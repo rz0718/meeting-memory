@@ -1,0 +1,14 @@
+# Copy this file to meeting-memory.ini and adjust the paths for your machine.
+# The local meeting-memory.ini file is intentionally ignored by Git.
+
+[paths]
+meetings_dir = /path/to/meeting-logs
+output_dir = /path/to/meeting-memory-data
+
+# This file contains a secret after api_key is filled in. Never commit the
+# local meeting-memory.ini file. Model IDs use OpenRouter's provider/model form.
+[openrouter]
+api_key =
+model = provider/model-name
+# Optional; when blank, ask uses model above.
+ask_model =

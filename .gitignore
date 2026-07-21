@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# Local configuration and credentials. Keep only sanitized examples in Git.
+*.ini
+!*.ini.example
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Default runtime data when the CLI is run without external paths.
+.knowledge-index/
+.knowledge-state/
+knowledge-review/
+logs/
+outputs/
