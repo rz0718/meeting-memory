@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import configparser
 import datetime as dt
 import json
 import os
@@ -18,6 +17,11 @@ from .answers import (
     render_answer,
 )
 from .constants import CATEGORIES, CONFIDENCES, EXTRACTOR_VERSION, STATUSES
+from .configuration import (
+    config_path as _config_path,
+    openrouter_configuration as _openrouter_configuration,
+    path_configuration as _path_configuration,
+)
 from .consumption import load_documents
 from .context import (
     InvalidContextBudgetError,
@@ -57,66 +61,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _config_path(value: Optional[str]) -> Optional[Path]:
-    explicit = value or os.environ.get("MEETING_MEMORY_CONFIG")
-    if explicit:
-        path = Path(explicit).expanduser().resolve()
-        if not path.is_file():
-            raise ConfigurationError("configuration file does not exist: %s" % path)
-        return path
-
-    candidates = [
-        Path.cwd() / "meeting-memory.ini",
-        Path(__file__).resolve().parents[3] / "meeting-memory.ini",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path.resolve()
-    return None
-
-
-def _path_configuration(value: Optional[str]) -> Dict[str, str]:
-    path = _config_path(value)
-    if path is None:
-        return {}
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        parser.read_string(path.read_text(encoding="utf-8"), source=str(path))
-    except (OSError, UnicodeError, configparser.Error) as exc:
-        raise ConfigurationError("cannot read configuration file %s: %s" % (path, exc)) from exc
-    if not parser.has_section("paths"):
-        raise ConfigurationError("configuration file %s is missing [paths]" % path)
-
-    configured: Dict[str, str] = {}
-    for key in ("meetings_dir", "output_dir"):
-        raw = parser.get("paths", key, fallback="").strip()
-        if not raw:
-            continue
-        configured_path = Path(raw).expanduser()
-        if not configured_path.is_absolute():
-            configured_path = path.parent / configured_path
-        configured[key] = str(configured_path.resolve())
-    return configured
-
-
-def _openrouter_configuration(value: Optional[str]) -> Dict[str, str]:
-    path = _config_path(value)
-    if path is None:
-        return {}
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        parser.read_string(path.read_text(encoding="utf-8"), source=str(path))
-    except (OSError, UnicodeError, configparser.Error) as exc:
-        raise ConfigurationError("cannot read configuration file %s: %s" % (path, exc)) from exc
-    if not parser.has_section("openrouter"):
-        return {}
-    return {
-        key: parser.get("openrouter", key, fallback="").strip()
-        for key in ("api_key", "model", "ask_model")
-        if parser.get("openrouter", key, fallback="").strip()
-    }
 
 
 def _repository_paths(

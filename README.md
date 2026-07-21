@@ -42,8 +42,8 @@ are machine-specific. A different file can be selected with `--config` or
 meeting-memory --config /path/to/config.ini search "withdrawal policy"
 ```
 
-Configuration precedence is command-line path options, environment variables,
-the INI file, then built-in defaults.
+For interactive CLI commands, configuration precedence is command-line path
+options, environment variables, the INI file, then built-in defaults.
 
 The OpenRouter settings provide:
 
@@ -101,8 +101,21 @@ guide, see
 ## Scheduled processing
 
 The production runner is [scripts/run_daily_knowledge.sh](scripts/run_daily_knowledge.sh).
-It accepts the same two storage environment variables and defaults to the
-existing `ai-meeting-memory/meetings` input and memory-data store for continuity.
-It explicitly uses the project INI. While the INI `api_key` is blank,
-`~/.env.meeting-memory` is loaded as a backward-compatible fallback. Once an INI
-key is present, the environment file is no longer sourced by the runner.
+It requires `meetings_dir` and `output_dir` in the project INI and uses those
+values as the single source of truth for scheduled storage paths. Path
+environment variables are deliberately removed before the CLI is invoked, so
+they cannot silently override the INI during a scheduled run. While the INI
+`api_key` is blank, `~/.env.meeting-memory` is loaded as a backward-compatible
+fallback. Once an INI key is present, the environment file is no longer sourced
+by the runner.
+
+A minimal cron command is therefore:
+
+```cron
+/usr/bin/env TZ=Asia/Singapore DAILY_KNOWLEDGE_INCLUDE_TODAY=1 /development/ruipluang/meeting-memory/scripts/run_daily_knowledge.sh
+```
+
+The runner writes its dated log to `logs/` beneath the INI-defined
+`output_dir`. Cron output is intentionally left enabled so configuration errors
+that occur before the output directory is known remain visible to cron mail or
+the scheduler's journal.

@@ -11,7 +11,8 @@ from meeting_memory.knowledge.cli import (
     _processing_pipeline,
     _repository_paths,
 )
-from meeting_memory.knowledge.errors import EvidenceError
+from meeting_memory.knowledge.configuration import required_storage_paths
+from meeting_memory.knowledge.errors import ConfigurationError, EvidenceError
 from meeting_memory.knowledge.extractors import FakeExtractor
 from meeting_memory.knowledge.pipeline import KnowledgePipeline
 from meeting_memory.knowledge.repository import KnowledgeRepository
@@ -72,6 +73,30 @@ class ConfigurablePathsTest(unittest.TestCase):
                 output, meetings = _repository_paths(None, None, None, str(config))
             self.assertEqual((base / "data").resolve(), output)
             self.assertEqual((base / "notes").resolve(), meetings)
+
+    def test_runner_requires_both_ini_storage_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "meeting-memory.ini"
+            config.write_text("[paths]\nmeetings_dir = notes\n", encoding="utf-8")
+            with self.assertRaises(ConfigurationError):
+                required_storage_paths(str(config))
+
+    def test_runner_storage_paths_come_from_ini(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = base / "meeting-memory.ini"
+            config.write_text(
+                "[paths]\nmeetings_dir = ini-notes\noutput_dir = ini-data\n",
+                encoding="utf-8",
+            )
+            environment = {
+                "MEETING_MEMORY_MEETINGS_DIR": str(base / "env-notes"),
+                "MEETING_MEMORY_OUTPUT_DIR": str(base / "env-data"),
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                meetings, output = required_storage_paths(str(config))
+            self.assertEqual((base / "ini-notes").resolve(), meetings)
+            self.assertEqual((base / "ini-data").resolve(), output)
 
     def test_cli_paths_override_environment_and_ini(self):
         with tempfile.TemporaryDirectory() as temporary:
