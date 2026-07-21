@@ -109,12 +109,6 @@ they cannot silently override the INI during a scheduled run. While the INI
 fallback. Once an INI key is present, the environment file is no longer sourced
 by the runner.
 
-A minimal cron command is therefore:
-
-```cron
-/usr/bin/env TZ=Asia/Singapore DAILY_KNOWLEDGE_INCLUDE_TODAY=1 /development/ruipluang/meeting-memory/scripts/run_daily_knowledge.sh
-```
-
 The runner writes its dated log to `logs/` beneath the INI-defined
 `output_dir`. Cron output is intentionally left enabled so configuration errors
 that occur before the output directory is known remain visible to cron mail or
