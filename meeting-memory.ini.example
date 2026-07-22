@@ -5,10 +5,19 @@
 meetings_dir = /path/to/meeting-logs
 output_dir = /path/to/meeting-memory-data
 
-# This file contains a secret after api_key is filled in. Never commit the
-# local meeting-memory.ini file. Model IDs use OpenRouter's provider/model form.
+# This file contains secrets after api_key or bot_token is filled in. Never
+# commit the local meeting-memory.ini file. Model IDs use OpenRouter's
+# provider/model form.
 [openrouter]
 api_key =
 model = provider/model-name
 # Optional; when blank, ask uses model above.
 ask_model =
+
+# Optional Slack source. The bot must be a member of every configured channel.
+# Use one channel ID per indented line, or a comma-separated list.
+[slack]
+bot_token =
+channel_ids =
+#  C0123456789
+#  G0123456789

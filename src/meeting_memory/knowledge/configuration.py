@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .errors import ConfigurationError
 
@@ -82,6 +83,35 @@ def openrouter_configuration(value: Optional[str]) -> Dict[str, str]:
         key: parser.get("openrouter", key, fallback="").strip()
         for key in ("api_key", "model", "ask_model")
         if parser.get("openrouter", key, fallback="").strip()
+    }
+
+
+def slack_configuration(value: Optional[str]) -> Dict[str, Any]:
+    """Load Slack source settings from the shared INI file.
+
+    Channel IDs may be comma-, whitespace-, or newline-separated. Keeping this
+    parsing here gives the interactive CLI and scheduled runner one definition
+    of the configured Slack source set.
+    """
+    path, parser = _parser(value)
+    if not parser.has_section("slack"):
+        return {"channel_ids": []}
+
+    raw_channels = parser.get("slack", "channel_ids", fallback="")
+    channel_ids = []
+    for channel_id in re.split(r"[\s,]+", raw_channels.strip()):
+        if not channel_id or channel_id in channel_ids:
+            continue
+        if not re.fullmatch(r"[CDG][A-Z0-9]+", channel_id):
+            raise ConfigurationError(
+                "configuration file %s has invalid Slack channel ID: %s"
+                % (path, channel_id)
+            )
+        channel_ids.append(channel_id)
+
+    return {
+        "channel_ids": channel_ids,
+        "bot_token": parser.get("slack", "bot_token", fallback="").strip(),
     }
 
 

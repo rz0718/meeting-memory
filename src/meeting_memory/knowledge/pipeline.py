@@ -395,7 +395,7 @@ class KnowledgePipeline:
 
 ## Sources
 
-- %d notes examined
+- %d source documents examined
 - %d processed
 - %d unchanged
 
@@ -620,7 +620,7 @@ class KnowledgePipeline:
             for relative_path, expected_hash in initial_hashes.items():
                 current = sha256_file(self.repository.evidence_path(relative_path))
                 if current != expected_hash:
-                    raise StorageError("meeting source changed during processing: %s" % relative_path)
+                    raise StorageError("source document changed during processing: %s" % relative_path)
         except Exception as exc:
             manifest["errors"].append({"scope": "change_validation", "error": str(exc)})
             failed_sources = max(failed_sources, 1)

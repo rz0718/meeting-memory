@@ -21,6 +21,7 @@ from .configuration import (
     config_path as _config_path,
     openrouter_configuration as _openrouter_configuration,
     path_configuration as _path_configuration,
+    slack_configuration as _slack_configuration,
 )
 from .consumption import load_documents
 from .context import (
@@ -53,6 +54,7 @@ from .search import (
     search_documents,
     search_payload,
 )
+from .slack import SlackCollector
 from .util import atomic_write
 
 
@@ -169,7 +171,7 @@ def _add_context_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="meeting-memory",
-        description="Incrementally curate durable knowledge from local meeting notes.",
+        description="Incrementally curate durable knowledge from meeting and Slack sources.",
     )
     parser.add_argument(
         "--config",
@@ -211,6 +213,25 @@ def build_parser() -> argparse.ArgumentParser:
         "process-pending", help="process pending dates oldest first"
     )
     _add_process_options(process_pending, pending=True)
+
+    sync_sources = commands.add_parser(
+        "sync-sources", help="collect configured remote sources into dated Markdown"
+    )
+    sync_range = sync_sources.add_mutually_exclusive_group()
+    sync_range.add_argument("--date", type=_iso_date, help="collect one UTC date")
+    sync_range.add_argument(
+        "--lookback-days",
+        type=_positive,
+        default=1,
+        help="number of UTC dates ending yesterday (default: 1)",
+    )
+    sync_sources.add_argument(
+        "--include-today",
+        action="store_true",
+        help="make the range end after today instead of before today",
+    )
+    sync_sources.add_argument("--dry-run", action="store_true", help="fetch and show changes without writing")
+    _add_output(sync_sources)
 
     status = commands.add_parser("status", help="report pending, failed, and curated state")
     status.add_argument(
@@ -369,6 +390,14 @@ def _processing_pipeline(
     return KnowledgePipeline(repository, extractor)
 
 
+def _slack_token(configured: Dict[str, Any]) -> Optional[str]:
+    return (
+        os.environ.get("SLACK_BOT_TOKEN")
+        or os.environ.get("SLACK_TOKEN")
+        or configured.get("bot_token")
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -381,11 +410,42 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.base_dir, args.meetings_dir, args.output_dir, args.config
         )
         openrouter = _openrouter_configuration(args.config)
+        slack = _slack_configuration(args.config)
         repository = KnowledgeRepository(
             output_dir,
             meetings_dir=meetings_dir,
             require_evidence_sources=not args.allow_missing_evidence,
         )
+        if args.command == "sync-sources":
+            today = dt.date.today()
+            if args.date:
+                start_date = args.date
+                end_date = start_date + dt.timedelta(days=1)
+            else:
+                end_date = today + dt.timedelta(days=1) if args.include_today else today
+                start_date = end_date - dt.timedelta(days=args.lookback_days)
+            result = SlackCollector(
+                meetings_dir,
+                slack.get("channel_ids", []),
+                token=_slack_token(slack),
+            ).sync(start_date, end_date, dry_run=args.dry_run)
+            if args.json:
+                print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            else:
+                mode = "Dry run" if result.dry_run else "Sync"
+                print(
+                    "%s: %d Slack channels, %d messages, %d changed files, %d unchanged files."
+                    % (
+                        mode,
+                        result.channels,
+                        result.messages,
+                        len(result.files_changed),
+                        len(result.files_unchanged),
+                    )
+                )
+                for path in result.files_changed:
+                    print("  changed: %s" % path)
+            return 0
         if args.command == "index":
             result = generate_indexes(
                 repository,

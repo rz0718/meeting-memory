@@ -226,7 +226,7 @@ def load_documents(repository: KnowledgeRepository) -> Tuple[SearchDocument, ...
     for obj in objects:
         for evidence in obj.evidence:
             # Historical evidence fingerprints may legitimately be stale after
-            # a meeting note is resynced, but its confined source path must
+            # a source note is resynced, but its confined source path must
             # still exist for every consumption command.
             repository.validate_evidence(evidence, require_current_hash=False)
     return tuple(document_from_object(repository, obj) for obj in objects)

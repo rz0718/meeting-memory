@@ -104,7 +104,7 @@ def _root_readme() -> str:
     lines = [
         "# Durable Knowledge",
         "",
-        "This directory contains curated, evidence-backed knowledge extracted from meeting notes.",
+        "This directory contains curated, evidence-backed knowledge extracted from meeting and Slack sources.",
         "Markdown objects in category directories are canonical; `README.md` and `_index/` are",
         "generated browse surfaces that are safe to delete and rebuild on the source VM.",
         "",
@@ -125,7 +125,7 @@ def _root_readme() -> str:
             "- [Unclear and proposed](_index/unclear-and-proposed.md)",
             "- [By owner](_index/owners.md)",
             "",
-            "Each canonical object lists meeting evidence paths and stored line ranges. Follow",
+            "Each canonical object lists source evidence paths and stored line ranges. Follow",
             "those references back to `meetings/` when the supporting discussion is needed.",
             "",
             "## Command-line search",

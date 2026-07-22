@@ -1,8 +1,8 @@
 # Meeting Memory
 
-Meeting Memory turns Markdown meeting logs into an evidence-backed, searchable
-memory store. This repository contains only the memory engine; meeting logs and
-generated memory can live in directories outside this checkout.
+Meeting Memory turns Google Meet notes and selected Slack channels into an
+evidence-backed, searchable memory store. This repository contains only the
+memory engine; source notes and generated memory can live outside this checkout.
 
 ## Install
 
@@ -31,6 +31,12 @@ api_key = sk-or-v1-your-key
 model = provider/model-name
 # Optional; falls back to model when blank.
 ask_model =
+
+[slack]
+bot_token = xoxb-your-bot-token
+channel_ids =
+  C0123456789
+  G0123456789
 ```
 
 The CLI automatically loads `meeting-memory.ini` from the current directory or
@@ -64,6 +70,15 @@ The OpenRouter settings provide:
 - `model`: default OpenRouter model for knowledge extraction;
 - `ask_model`: optional model used only by `ask`.
 
+The optional Slack settings provide:
+
+- `bot_token`: Slack bot token (or use `SLACK_BOT_TOKEN` in the scheduler environment);
+- `channel_ids`: comma-, whitespace-, or newline-separated public/private channel IDs.
+
+The bot must be a member of each channel and have `channels:history` for public
+channels or `groups:history` for private channels. `users:read` is optional; if
+it is unavailable, message authors remain stable Slack user IDs.
+
 Protect the local file after adding the API key:
 
 ```bash
@@ -91,8 +106,9 @@ export MEETING_MEMORY_OUTPUT_DIR=/path/to/meeting-memory-data
 meeting-memory status
 ```
 
-The meetings directory is read as input and must contain
-`YYYY-MM-DD/<meeting>.md`. The output directory owns all generated state:
+The meetings directory contains Google Meet notes and the Markdown snapshots
+generated from Slack. Sources use `YYYY-MM-DD/<source>.md`. The output directory
+owns all generated state:
 
 ```text
 /path/to/meeting-memory-data/
@@ -121,6 +137,21 @@ they cannot silently override the INI during a scheduled run. While the INI
 `api_key` is blank, `~/.env.meeting-memory` is loaded as a backward-compatible
 fallback. Once an INI key is present, the environment file is no longer sourced
 by the runner.
+
+Each scheduled attempt first runs `sync-sources`, which fetches every page of
+messages from the configured Slack channels for the lookback window, including
+thread replies for threads discovered in that window. It writes deterministic
+`YYYY-MM-DD/slack-<channel-id>.md` snapshots using UTC date boundaries. The same
+attempt then runs `process-pending`, so newly collected Slack snapshots and
+existing Google Meet notes are extracted and reconciled together. Files whose
+content has not changed are skipped by the normal source hash checkpoint.
+
+You can inspect or backfill collection separately:
+
+```bash
+meeting-memory sync-sources --date 2026-07-21
+meeting-memory sync-sources --lookback-days 30 --dry-run
+```
 
 The runner writes its dated log to `logs/` beneath the INI-defined
 `output_dir`. Cron output is intentionally left enabled so configuration errors

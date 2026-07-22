@@ -98,7 +98,8 @@ class OpenRouterExtractor(KnowledgeExtractor):
 
     @staticmethod
     def _prompt(source: MeetingSource) -> str:
-        return """You extract only durable company knowledge from a meeting note.
+        return """You extract only durable company knowledge from a dated source document.
+The document may contain Google Meet notes or a Slack channel message digest.
 
 Return JSON only, with this exact top-level shape:
 {"candidates": [candidate, ...]}
@@ -113,10 +114,12 @@ Allowed confidence: %s
 
 Each evidence item must contain source, anchor, line_start, line_end. The source
 must be exactly %s. Use 1-based inclusive line numbers from the supplied note.
-Use null for unknown dates or owners. Do not invent approval, dates, ownership,
-or evidence. Exclude ordinary actions, blockers, deadlines, casual discussion,
-transient status, unsupported opinion, and speculation. An empty candidate list
-is valid. Do not mark anything deprecated.
+Use null for unknown dates or owners. For Slack, distinguish the message author
+from an explicitly assigned owner and do not treat ordinary conversation as an
+approved decision. Do not invent approval, dates, ownership, or evidence.
+Exclude ordinary actions, blockers, deadlines, casual discussion, transient
+status, unsupported opinion, and speculation. An empty candidate list is valid.
+Do not mark anything deprecated.
 
 SOURCE SHA-256: %s
 SOURCE DATE: %s

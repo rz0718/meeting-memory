@@ -80,7 +80,7 @@ Rules:
 - Surface open conflicts explicitly.
 - Do not infer missing facts.
 - Distinguish current policy from historical discussion.
-- Cite the supplied knowledge object IDs and meeting sources.
+- Cite the supplied knowledge object IDs and source documents.
 - State when the available evidence is insufficient."""
 
 

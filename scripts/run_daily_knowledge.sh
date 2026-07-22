@@ -147,25 +147,19 @@ if ! grep -Eq '^[[:space:]]*api_key[[:space:]]*=[[:space:]]*[^#[:space:]]' "$CON
   set +a
 fi
 
-# Extraction has no Slack responsibility; do not expose Slack credentials.
-while IFS='=' read -r variable_name _; do
-  case "$variable_name" in
-    SLACK_*) unset "$variable_name" ;;
-  esac
-done < <(env)
-
 if [ -n "$TARGET_DATE" ]; then
+  sync_args=(sync-sources --date "$TARGET_DATE")
   command_args=(process-date "$TARGET_DATE" --lookback-days "$LOOKBACK_DAYS")
 else
+  sync_args=(sync-sources --lookback-days "$LOOKBACK_DAYS")
   command_args=(process-pending --lookback-days "$LOOKBACK_DAYS")
 fi
+[ "$DRY_RUN" -eq 0 ] || sync_args+=(--dry-run)
 [ "$DRY_RUN" -eq 0 ] || command_args+=(--dry-run)
 [ "$FORCE" -eq 0 ] || command_args+=(--force)
 
 run_cli() {
   env \
-    -u SLACK_BOT_TOKEN \
-    -u SLACK_TOKEN \
     -u SLACK_APP_TOKEN \
     -u SLACK_SIGNING_SECRET \
     -u DAILY_KNOWLEDGE_BASE_DIR \
@@ -176,12 +170,17 @@ run_cli() {
     "$PYTHON_BIN" -m meeting_memory.knowledge --config "$CONFIG_FILE" "$@"
 }
 
+run_collection_and_extraction() {
+  run_cli "${sync_args[@]}" || return $?
+  run_cli "${command_args[@]}"
+}
+
 attempt=1
 while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
-  log "Attempt $attempt/$MAX_ATTEMPTS: durable knowledge ${TARGET_DATE:-pending dates}"
+  log "Attempt $attempt/$MAX_ATTEMPTS: collect sources and extract durable knowledge for ${TARGET_DATE:-pending dates}"
   attempt_log="$(mktemp)"
   set +e
-  run_cli "${command_args[@]}" 2>&1 | redact | tee -a "$LOG_FILE" "$attempt_log"
+  run_collection_and_extraction 2>&1 | redact | tee -a "$LOG_FILE" "$attempt_log"
   status=${PIPESTATUS[0]}
   set -e
 
