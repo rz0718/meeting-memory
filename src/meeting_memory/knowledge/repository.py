@@ -44,7 +44,12 @@ class KnowledgeRepository:
     than embedding an absolute machine-specific path.
     """
 
-    def __init__(self, root: Path, meetings_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        root: Path,
+        meetings_dir: Optional[Path] = None,
+        require_evidence_sources: bool = True,
+    ):
         self.root = Path(root).resolve()
         self.meetings_dir = (
             Path(meetings_dir).resolve()
@@ -52,6 +57,7 @@ class KnowledgeRepository:
             else self.root / "meetings"
         )
         self.knowledge_dir = self.root / "knowledge"
+        self.require_evidence_sources = require_evidence_sources
         self.review_dir = self.root / "knowledge-review"
         self.state_dir = self.root / ".knowledge-state"
         self.outputs_dir = self.root / "outputs" / "Durable-Knowledge"
@@ -397,6 +403,8 @@ class KnowledgeRepository:
     def validate_evidence(self, evidence: Evidence, require_current_hash: bool = True) -> None:
         source_path = self.evidence_path(evidence.source)
         if not source_path.is_file():
+            if not self.require_evidence_sources:
+                return
             raise EvidenceError("evidence source is missing: %s" % evidence.source)
         if require_current_hash and evidence.source_sha256 != sha256_file(source_path):
             raise EvidenceError("evidence fingerprint does not match: %s" % evidence.source)

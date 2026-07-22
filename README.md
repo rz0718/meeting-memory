@@ -42,6 +42,19 @@ are machine-specific. A different file can be selected with `--config` or
 meeting-memory --config /path/to/config.ini search "withdrawal policy"
 ```
 
+For a read-only mirror that intentionally contains curated `knowledge/` but no
+raw meeting notes, add `--allow-missing-evidence` before the consumption
+command:
+
+```bash
+meeting-memory --config /path/to/config.ini --allow-missing-evidence \
+  context "What is the withdrawal policy?" --no-review-items
+```
+
+The flag still validates evidence path syntax and knowledge metadata. It only
+relaxes the requirement that the referenced meeting files exist locally, and
+is rejected for extraction commands.
+
 For interactive CLI commands, configuration precedence is command-line path
 options, environment variables, the INI file, then built-in defaults.
 

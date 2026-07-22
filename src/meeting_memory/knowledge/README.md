@@ -133,6 +133,22 @@ key plus a model:
 | `search` / `show` / `context` | no | no (reads curated `knowledge/`) |
 | `index` / `status` / `validate` | no | `status` scans note dates only |
 
+### Read-only knowledge mirrors without meeting notes
+
+Consumption commands can operate on a detached curated mirror when raw meeting
+notes are intentionally unavailable:
+
+```bash
+meeting-memory --allow-missing-evidence search "withdrawal policy"
+meeting-memory --allow-missing-evidence context "Who owns Fireblocks?" --no-review-items
+meeting-memory --allow-missing-evidence validate
+```
+
+Place the flag before the subcommand. Evidence identifiers are still checked
+for safe `meetings/...` paths, but source-file existence is not required. The
+flag is rejected for `process-date` and `process-pending` so extraction can
+never run without its evidence files.
+
 ## Quick start with your own notes
 
 ```bash

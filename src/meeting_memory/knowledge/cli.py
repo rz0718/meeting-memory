@@ -196,6 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show tracebacks for maintainers",
     )
+    parser.add_argument(
+        "--allow-missing-evidence",
+        action="store_true",
+        help="allow read-only consumption from a detached knowledge mirror",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     process_date = commands.add_parser("process-date", help="process one explicit date")
@@ -367,11 +372,20 @@ def _processing_pipeline(
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        detached_commands = {"index", "search", "show", "context", "ask", "validate"}
+        if args.allow_missing_evidence and args.command not in detached_commands:
+            raise ValueError(
+                "--allow-missing-evidence is limited to read-only consumption commands"
+            )
         output_dir, meetings_dir = _repository_paths(
             args.base_dir, args.meetings_dir, args.output_dir, args.config
         )
         openrouter = _openrouter_configuration(args.config)
-        repository = KnowledgeRepository(output_dir, meetings_dir=meetings_dir)
+        repository = KnowledgeRepository(
+            output_dir,
+            meetings_dir=meetings_dir,
+            require_evidence_sources=not args.allow_missing_evidence,
+        )
         if args.command == "index":
             result = generate_indexes(
                 repository,
