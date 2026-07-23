@@ -17,7 +17,7 @@ from .extractors import KnowledgeExtractor
 from .models import Evidence, KnowledgeCandidate, KnowledgeObject, ReviewItem
 from .reconcile import KnowledgeReconciler, knowledge_id
 from .repository import KnowledgeRepository
-from .util import iso_z, json_bytes, normalize_text, run_id, sha256_file, slugify, utc_now
+from .util import iso_z, json_bytes, local_today, normalize_text, run_id, sha256_file, slugify, utc_now
 
 
 @dataclass
@@ -684,7 +684,7 @@ class KnowledgePipeline:
     ) -> List[str]:
         if lookback_days < 1:
             raise SchemaError("lookback-days must be at least 1")
-        today = today or dt.date.today()
+        today = today or local_today()
         earliest = today - dt.timedelta(days=lookback_days)
         result = []
         for value in self.repository.discover_dates():
@@ -705,7 +705,7 @@ class KnowledgePipeline:
         today: Optional[dt.date] = None,
     ) -> Dict[str, Any]:
         pending_sources = []
-        today = today or dt.date.today()
+        today = today or local_today()
         earliest = today - dt.timedelta(days=lookback_days)
         for value in self.repository.discover_dates():
             date_value = dt.date.fromisoformat(value)

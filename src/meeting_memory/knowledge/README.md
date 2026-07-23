@@ -59,11 +59,12 @@ each channel and have `channels:history` (public channels) or `groups:history`
 (private channels). Add `users:read` for display names; collection still works
 without it and records user IDs.
 
-Collection uses UTC day boundaries, follows cursor pagination, collects thread
-replies for thread parents found in the requested window, and includes message
-text, attachment text, and file links. It emits deterministic
-`slack-<channel-id>.md` files. An empty day is marked `durable_knowledge: false`
-and does not call the extractor.
+Collection uses local-calendar-day boundaries (fixed UTC offset, default
+UTC+8/Singapore; override with `MEETING_TZ_UTC_OFFSET_HOURS`), follows cursor
+pagination, collects thread replies for thread parents found in the requested
+window, and includes message text, attachment text, and file links. It emits
+deterministic `slack-<channel-id>.md` files. An empty day is marked
+`durable_knowledge: false` and does not call the extractor.
 
 ```bash
 # Collect one date, then extract every qualifying Meet and Slack source for it.

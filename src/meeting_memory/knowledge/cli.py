@@ -55,7 +55,7 @@ from .search import (
     search_payload,
 )
 from .slack import SlackCollector
-from .util import atomic_write
+from .util import atomic_write, local_today
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -218,16 +218,17 @@ def build_parser() -> argparse.ArgumentParser:
         "sync-sources", help="collect configured remote sources into dated Markdown"
     )
     sync_range = sync_sources.add_mutually_exclusive_group()
-    sync_range.add_argument("--date", type=_iso_date, help="collect one UTC date")
+    sync_range.add_argument("--date", type=_iso_date, help="collect one local-calendar date")
     sync_range.add_argument(
         "--lookback-days",
         type=_positive,
         default=1,
-        help="number of UTC dates ending yesterday (default: 1)",
+        help="number of local-calendar dates ending yesterday (default: 1)",
     )
     sync_sources.add_argument(
         "--include-today",
         action="store_true",
+        default=_env_bool("DAILY_KNOWLEDGE_INCLUDE_TODAY"),
         help="make the range end after today instead of before today",
     )
     sync_sources.add_argument("--dry-run", action="store_true", help="fetch and show changes without writing")
@@ -417,7 +418,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             require_evidence_sources=not args.allow_missing_evidence,
         )
         if args.command == "sync-sources":
-            today = dt.date.today()
+            today = local_today()
             if args.date:
                 start_date = args.date
                 end_date = start_date + dt.timedelta(days=1)
@@ -609,7 +610,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         else:
             if args.force:
-                today = dt.date.today()
+                today = local_today()
                 earliest = today - dt.timedelta(days=args.lookback_days)
                 dates = [
                     value

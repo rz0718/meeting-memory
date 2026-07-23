@@ -1,7 +1,9 @@
 import datetime as dt
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from meeting_memory.knowledge.configuration import slack_configuration
 from meeting_memory.knowledge.errors import ConfigurationError, StorageError
@@ -9,6 +11,7 @@ from meeting_memory.knowledge.extractors import FakeExtractor
 from meeting_memory.knowledge.pipeline import KnowledgePipeline
 from meeting_memory.knowledge.repository import KnowledgeRepository
 from meeting_memory.knowledge.slack import SlackCollector
+from meeting_memory.knowledge.util import local_timezone
 
 
 def slack_ts(day, hour, minute=0):
@@ -194,6 +197,76 @@ class SlackCollectorTest(unittest.TestCase):
                 SlackCollector(meetings, ["C123"], client=FakeSlackClient(day)).sync(
                     day, day + dt.timedelta(days=1)
                 )
+
+    def test_message_near_utc_midnight_buckets_into_next_local_day(self):
+        # 23:30 UTC is 07:30 in a UTC+8 local day, i.e. the *next* local date.
+        day = dt.date(2026, 7, 21)
+        late_ts = slack_ts(day, 23, 30)
+
+        class LateNightClient:
+            def call(self, method, params):
+                if method == "conversations.history":
+                    return {
+                        "ok": True,
+                        "messages": [
+                            {
+                                "type": "message",
+                                "user": "U1",
+                                "text": "Late-night message.",
+                                "ts": late_ts,
+                            }
+                        ],
+                        "response_metadata": {"next_cursor": ""},
+                    }
+                if method == "users.info":
+                    return {
+                        "ok": True,
+                        "user": {"id": params["user"], "profile": {"display_name": "Alice"}},
+                    }
+                raise AssertionError("unexpected Slack method %s" % method)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            meetings = Path(temporary) / "meetings"
+            collector = SlackCollector(
+                meetings,
+                ["C123"],
+                client=LateNightClient(),
+                local_tz=dt.timezone(dt.timedelta(hours=8)),
+            )
+
+            result = collector.sync(day, day + dt.timedelta(days=2))
+
+            next_day = (day + dt.timedelta(days=1)).isoformat()
+            self.assertIn("%s/slack-c123.md" % next_day, result.files_changed)
+            next_day_text = (meetings / next_day / "slack-c123.md").read_text(encoding="utf-8")
+            self.assertIn("Late-night message.", next_day_text)
+            self.assertIn("07:30:00 UTC+08:00", next_day_text)
+
+            same_day_text = (meetings / day.isoformat() / "slack-c123.md").read_text(encoding="utf-8")
+            self.assertIn("durable_knowledge: false", same_day_text)
+
+
+class LocalTimezoneTest(unittest.TestCase):
+    def test_defaults_to_utc_plus_8(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MEETING_TZ_UTC_OFFSET_HOURS", None)
+            tz = local_timezone()
+        self.assertEqual(dt.timedelta(hours=8), tz.utcoffset(None))
+
+    def test_respects_override(self):
+        with mock.patch.dict(os.environ, {"MEETING_TZ_UTC_OFFSET_HOURS": "5"}):
+            tz = local_timezone()
+        self.assertEqual(dt.timedelta(hours=5), tz.utcoffset(None))
+
+    def test_rejects_non_integer_offset(self):
+        with mock.patch.dict(os.environ, {"MEETING_TZ_UTC_OFFSET_HOURS": "Asia/Singapore"}):
+            with self.assertRaises(ConfigurationError):
+                local_timezone()
+
+    def test_rejects_out_of_range_offset(self):
+        with mock.patch.dict(os.environ, {"MEETING_TZ_UTC_OFFSET_HOURS": "24"}):
+            with self.assertRaises(ConfigurationError):
+                local_timezone()
 
 
 if __name__ == "__main__":

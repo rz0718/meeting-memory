@@ -13,11 +13,45 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
-from .errors import SchemaError, StorageError
+from .errors import ConfigurationError, SchemaError, StorageError
 
 
 def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def local_timezone() -> dt.timezone:
+    """The team's operating calendar day, as a fixed UTC offset.
+
+    A fixed offset (default UTC+8, Singapore) is used instead of the stdlib
+    zoneinfo module: zoneinfo is py3.9+ only and this project supports
+    python_requires >= 3.8 with no third-party deps. Singapore itself has had
+    no DST since 1982, so a fixed offset is also simply correct, not just a
+    workaround. This mirrors, in intent rather than mechanism, the sibling
+    ai-meeting-memory project's MEETING_TZ (an IANA zone name via zoneinfo,
+    since that project targets a newer Python) -- the two are deliberately
+    different config knobs and are not read from the same environment
+    variable, so keeping the org's local day in agreement across both
+    projects is a manual, cross-repo concern.
+    """
+    raw = os.environ.get("MEETING_TZ_UTC_OFFSET_HOURS", "8")
+    try:
+        hours = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "MEETING_TZ_UTC_OFFSET_HOURS must be an integer number of UTC offset "
+            "hours (got %r)" % raw
+        ) from exc
+    try:
+        return dt.timezone(dt.timedelta(hours=hours))
+    except ValueError as exc:
+        raise ConfigurationError(
+            "MEETING_TZ_UTC_OFFSET_HOURS must be between -23 and 23 (got %r)" % raw
+        ) from exc
+
+
+def local_today() -> dt.date:
+    return dt.datetime.now(local_timezone()).date()
 
 
 def iso_z(value: Optional[dt.datetime] = None) -> str:
