@@ -158,26 +158,36 @@ def _validate_answer(
 class OpenRouterAnswerer(KnowledgeAnswerer):
     """OpenRouter implementation of grounded durable-knowledge QA."""
 
+    max_attempts = 3
+
     def __init__(self, client: OpenRouterChatClient):
         self.client = client
 
     def answer(self, packet: ContextPacket) -> KnowledgeAnswer:
-        content = self.client.complete(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "QUESTION:\n%s\n\n"
-                        "BEGIN DURABLE-KNOWLEDGE CONTEXT\n%s"
-                        "END DURABLE-KNOWLEDGE CONTEXT"
-                    )
-                    % (packet.query, packet.markdown),
-                },
-            ],
-            response_format={"type": "json_object"},
-        )
-        return _validate_answer(packet, _decode_json(content), self.client.model)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "QUESTION:\n%s\n\n"
+                    "BEGIN DURABLE-KNOWLEDGE CONTEXT\n%s"
+                    "END DURABLE-KNOWLEDGE CONTEXT"
+                )
+                % (packet.query, packet.markdown),
+            },
+        ]
+        last_error: Optional[AnswerValidationError] = None
+        for _ in range(self.max_attempts):
+            content = self.client.complete(
+                messages, response_format={"type": "json_object"}
+            )
+            try:
+                return _validate_answer(
+                    packet, _decode_json(content), self.client.model
+                )
+            except AnswerValidationError as exc:
+                last_error = exc
+        raise last_error
 
 
 def insufficient_answer(packet: ContextPacket) -> KnowledgeAnswer:
