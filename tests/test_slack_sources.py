@@ -10,7 +10,7 @@ from meeting_memory.knowledge.errors import ConfigurationError, StorageError
 from meeting_memory.knowledge.extractors import FakeExtractor
 from meeting_memory.knowledge.pipeline import KnowledgePipeline
 from meeting_memory.knowledge.repository import KnowledgeRepository
-from meeting_memory.knowledge.slack import SlackCollector
+from meeting_memory.knowledge.slack import SlackApiError, SlackCollector
 from meeting_memory.knowledge.util import local_timezone
 
 
@@ -117,6 +117,48 @@ class SlackConfigurationTest(unittest.TestCase):
 
 
 class SlackCollectorTest(unittest.TestCase):
+    def test_resolves_mentions_to_cached_real_names_and_preserves_unknown_users(self):
+        class ProfileClient:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, method, params):
+                self.calls.append((method, dict(params)))
+                if method != "users.info":
+                    raise AssertionError("unexpected Slack method %s" % method)
+                if params["user"] == "U1":
+                    return {
+                        "ok": True,
+                        "user": {
+                            "id": "U1",
+                            "name": "alice",
+                            "profile": {
+                                "display_name": "Ali",
+                                "real_name": "Alice Example",
+                            },
+                        },
+                    }
+                raise SlackApiError("missing_scope")
+
+        client = ProfileClient()
+        collector = SlackCollector(Path("meetings"), ["C123"], client=client)
+
+        rendered = collector._message_text(
+            {"text": "Please ask <@U1> and <@U1>; keep <@U2> unchanged."}
+        )
+
+        self.assertEqual(
+            "Please ask @Alice Example and @Alice Example; keep <@U2> unchanged.",
+            rendered,
+        )
+        self.assertEqual(
+            [
+                ("users.info", {"user": "U1"}),
+                ("users.info", {"user": "U2"}),
+            ],
+            client.calls,
+        )
+
     def test_collects_paginated_messages_threads_and_files_as_a_source(self):
         day = dt.date(2026, 7, 21)
         with tempfile.TemporaryDirectory() as temporary:
