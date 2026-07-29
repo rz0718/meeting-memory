@@ -16,6 +16,7 @@ from .constants import (
     GENERATED_END,
     MANUAL_BEGIN,
     MANUAL_END,
+    REVIEW_STATUSES,
 )
 from .errors import EvidenceError, SchemaError, StorageError
 from .models import (
@@ -23,6 +24,7 @@ from .models import (
     KnowledgeObject,
     MeetingSource,
     ReviewItem,
+    validate_review_run_manifest,
     validate_run_manifest,
     validate_source_state,
 )
@@ -59,16 +61,19 @@ class KnowledgeRepository:
         self.knowledge_dir = self.root / "knowledge"
         self.require_evidence_sources = require_evidence_sources
         self.review_dir = self.root / "knowledge-review"
+        self.suggestion_dir = self.review_dir / "suggestions"
         self.state_dir = self.root / ".knowledge-state"
+        self.review_run_dir = self.state_dir / "review-runs"
         self.outputs_dir = self.root / "outputs" / "Durable-Knowledge"
         self.logs_dir = self.root / "logs"
 
     def ensure_layout(self) -> None:
         for category in CATEGORIES:
             (self.knowledge_dir / category).mkdir(parents=True, exist_ok=True)
-        for status in ("pending", "resolved", "rejected"):
+        for status in REVIEW_STATUSES:
             (self.review_dir / status).mkdir(parents=True, exist_ok=True)
-        for child in ("sources", "runs"):
+        self.suggestion_dir.mkdir(parents=True, exist_ok=True)
+        for child in ("sources", "runs", "review-runs"):
             (self.state_dir / child).mkdir(parents=True, exist_ok=True)
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +263,28 @@ class KnowledgeRepository:
             )
             for ev in item.candidate_evidence
         ) or "- None"
+        resolution = ""
+        if item.resolution_action:
+            resolution = (
+                "\n\n## Resolution\n\n"
+                "- Action: `%s`\n"
+                "- Reviewer: %s\n"
+                "- Resolved at: %s\n"
+                "- Affected objects: %s\n"
+                "- Duplicate of: %s\n"
+                "- Allowed stale evidence: %s\n\n"
+                "%s"
+                % (
+                    item.resolution_action,
+                    item.reviewer,
+                    item.resolved_at,
+                    ", ".join("`%s`" % value for value in item.affected_object_ids)
+                    or "None",
+                    "`%s`" % item.duplicate_of if item.duplicate_of else "None",
+                    "yes" if item.allowed_stale_evidence else "no",
+                    item.resolution_note,
+                )
+            )
         text = (
             "---\n%s\n---\n\n"
             "# %s\n\n"
@@ -267,10 +294,12 @@ class KnowledgeRepository:
             "### Candidate evidence\n\n%s\n\n"
             "## Why review is required\n\n%s\n\n"
             "## Suggested actions\n\n"
-            "- confirm the current approved statement\n"
-            "- retain the existing knowledge\n"
-            "- update the knowledge manually\n"
-            "- reject the candidate\n"
+            "- accept as replacement\n"
+            "- accept as refinement\n"
+            "- reconfirm or retain the existing knowledge\n"
+            "- create a separate knowledge object\n"
+            "- reject or merge a duplicate candidate"
+            "%s\n"
         ) % (
             dump_frontmatter(item.to_frontmatter()),
             item.title,
@@ -279,6 +308,7 @@ class KnowledgeRepository:
             item.candidate_statement,
             candidate_evidence,
             item.explanation,
+            resolution,
         )
         return text.encode("utf-8")
 
@@ -295,15 +325,56 @@ class KnowledgeRepository:
                 raise SchemaError("review item %s is missing section %s" % (path, name))
             return match.group(1).strip()
 
+        def parsed_evidence(value: str, label: str) -> List[Evidence]:
+            evidence = []
+            pattern = re.compile(
+                r"(?m)^- `(?P<source>[^`]+)` "
+                r"\(sha256 `(?P<sha>[0-9a-f]{64})`, "
+                r"anchor `(?P<anchor>.*)`, "
+                r"lines (?P<start>\d+)-(?P<end>\d+), "
+                r"observed (?P<observed>\d{4}-\d{2}-\d{2})\)$"
+            )
+            for match in pattern.finditer(value):
+                evidence.append(
+                    Evidence.from_dict(
+                        {
+                            "source": match.group("source"),
+                            "source_sha256": match.group("sha"),
+                            "anchor": match.group("anchor"),
+                            "line_start": int(match.group("start")),
+                            "line_end": int(match.group("end")),
+                            "observed_at": match.group("observed"),
+                        },
+                        complete=True,
+                    )
+                )
+            if "- None" not in value and not evidence:
+                raise SchemaError(
+                    "review item %s has invalid %s evidence" % (path, label)
+                )
+            return evidence
+
         title_match = re.search(r"(?m)^# (.+)$", body)
         if not title_match:
             raise SchemaError("review item %s is missing title" % path)
-        existing = section("Existing knowledge", "New candidate")
-        existing = existing.split("\n\n### Existing evidence", 1)[0].strip()
+        existing_section = section("Existing knowledge", "New candidate")
+        existing_parts = existing_section.split("\n\n### Existing evidence", 1)
+        existing = existing_parts[0].strip()
         if existing.startswith("_No single"):
             existing = None
-        candidate = section("New candidate", "Why review is required")
-        candidate = candidate.split("\n\n### Candidate evidence", 1)[0].strip()
+        existing_evidence = (
+            parsed_evidence(existing_parts[1], "existing")
+            if len(existing_parts) == 2
+            else []
+        )
+        candidate_section = section("New candidate", "Why review is required")
+        candidate_parts = candidate_section.split("\n\n### Candidate evidence", 1)
+        candidate = candidate_parts[0].strip()
+        candidate_evidence = (
+            parsed_evidence(candidate_parts[1], "candidate")
+            if len(candidate_parts) == 2
+            else []
+        )
         explanation_match = re.search(
             r"(?m)^## Why review is required\s*$\n+([\s\S]*?)(?=^## Suggested actions\s*$)",
             body,
@@ -315,23 +386,26 @@ class KnowledgeRepository:
             title=title_match.group(1).strip(),
             existing_statement=existing,
             candidate_statement=candidate,
+            existing_evidence=existing_evidence,
+            candidate_evidence=candidate_evidence,
             explanation=explanation_match.group(1).strip(),
+            path=path,
         )
-        if path.parent.name in ("pending", "resolved", "rejected") and item.status != path.parent.name:
+        if path.parent.name in REVIEW_STATUSES and item.status != path.parent.name:
             raise SchemaError("review status does not match directory for %s" % path)
         for source in item.sources:
             try:
                 source_path = self.evidence_path(source)
             except EvidenceError as exc:
                 raise SchemaError(str(exc)) from exc
-            if not source_path.is_file():
+            if self.require_evidence_sources and not source_path.is_file():
                 raise SchemaError("review source is missing: %s" % source)
         return item
 
     def load_reviews(self, status: Optional[str] = None) -> List[ReviewItem]:
-        if status is not None and status not in ("pending", "resolved", "rejected"):
+        if status is not None and status not in REVIEW_STATUSES:
             raise ValueError("unsupported review status: %s" % status)
-        statuses = (status,) if status else ("pending", "resolved", "rejected")
+        statuses = (status,) if status else REVIEW_STATUSES
         values = []
         seen = set()
         known_ids = {item.id for item in self.load_knowledge()}
@@ -349,12 +423,110 @@ class KnowledgeRepository:
                         "%s refers to missing knowledge objects: %s"
                         % (item.id, ", ".join(missing))
                     )
+                missing_affected = sorted(set(item.affected_object_ids) - known_ids)
+                if missing_affected:
+                    raise SchemaError(
+                        "%s resolution refers to missing knowledge objects: %s"
+                        % (item.id, ", ".join(missing_affected))
+                    )
                 seen.add(item.id)
                 values.append(item)
+        for item in values:
+            if item.duplicate_of and item.duplicate_of not in seen:
+                raise SchemaError(
+                    "%s duplicates missing review item: %s"
+                    % (item.id, item.duplicate_of)
+                )
         return values
 
     def load_review_ids(self) -> set:
         return {item.id for item in self.load_reviews()}
+
+    @staticmethod
+    def _artifact_id(value: str, label: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*", value
+        ):
+            raise SchemaError("%s has unsafe characters: %s" % (label, value))
+        return value
+
+    def suggestion_path(self, review_id: str, suggestion_id: str) -> Path:
+        review_id = self._artifact_id(review_id, "review ID")
+        suggestion_id = self._artifact_id(suggestion_id, "suggestion ID")
+        return self.suggestion_dir / review_id / ("%s.json" % suggestion_id)
+
+    def load_suggestion(self, review_id: str, suggestion_id: str) -> Any:
+        from .review_suggestions import ReviewSuggestion
+
+        path = self.suggestion_path(review_id, suggestion_id)
+        if not path.is_file():
+            raise SchemaError("suggestion artifact not found: %s" % suggestion_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SchemaError("invalid suggestion artifact %s: %s" % (path, exc)) from exc
+        suggestion = ReviewSuggestion.from_dict(raw)
+        if suggestion.id != suggestion_id or suggestion.review_id != review_id:
+            raise SchemaError("suggestion identity does not match its path: %s" % path)
+        return suggestion
+
+    def load_suggestions(self, review_id: str) -> List[Any]:
+        review_id = self._artifact_id(review_id, "review ID")
+        directory = self.suggestion_dir / review_id
+        if not directory.exists():
+            return []
+        values = []
+        for path in sorted(directory.glob("*.json")):
+            values.append(self.load_suggestion(review_id, path.stem))
+        return sorted(values, key=lambda value: (value.generated_at, value.id))
+
+    def write_suggestion(self, suggestion: Any) -> str:
+        from .review_suggestions import ReviewSuggestion
+
+        if not isinstance(suggestion, ReviewSuggestion):
+            raise TypeError("suggestion must be a ReviewSuggestion")
+        # Round-trip validation happens before the immutable artifact is written.
+        ReviewSuggestion.from_dict(suggestion.to_dict())
+        if suggestion.review_id not in self.load_review_ids():
+            raise SchemaError(
+                "suggestion refers to missing review: %s" % suggestion.review_id
+            )
+        path = self.suggestion_path(suggestion.review_id, suggestion.id)
+        if path.exists():
+            raise StorageError("suggestion artifact already exists: %s" % path)
+        atomic_write(path, json_bytes(suggestion.to_dict()))
+        return self._relative(path)
+
+    def review_run_path(self, run_id: str) -> Path:
+        run_id = self._artifact_id(run_id, "review run ID")
+        return self.review_run_dir / ("%s.json" % run_id)
+
+    def write_review_run_manifest(self, manifest: Dict[str, Any]) -> str:
+        validate_review_run_manifest(manifest)
+        path = self.review_run_path(manifest["run_id"])
+        if path.exists():
+            raise StorageError("review run manifest already exists: %s" % path)
+        for bucket in ("suggestions_created", "suggestions_reused"):
+            for review_id, suggestion_id in manifest[bucket].items():
+                self.load_suggestion(review_id, suggestion_id)
+        atomic_write(path, json_bytes(manifest))
+        return self._relative(path)
+
+    def iter_review_run_manifests(self) -> Iterable[Tuple[Path, Dict[str, Any]]]:
+        if not self.review_run_dir.exists():
+            return
+        for path in sorted(self.review_run_dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise SchemaError(
+                    "invalid review run manifest %s: %s" % (path, exc)
+                ) from exc
+            validate_review_run_manifest(raw)
+            for bucket in ("suggestions_created", "suggestions_reused"):
+                for review_id, suggestion_id in raw[bucket].items():
+                    self.load_suggestion(review_id, suggestion_id)
+            yield path, raw
 
     def state_path(self, source_path: str) -> Path:
         import hashlib
@@ -437,6 +609,20 @@ class KnowledgeRepository:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 validate_run_manifest(raw)
                 run_count += 1
+        known_review_ids = self.load_review_ids()
+        suggestion_count = 0
+        if self.suggestion_dir.exists():
+            for directory in sorted(self.suggestion_dir.iterdir()):
+                if not directory.is_dir():
+                    raise SchemaError(
+                        "unexpected file beneath suggestion directory: %s" % directory
+                    )
+                if directory.name not in known_review_ids:
+                    raise SchemaError(
+                        "suggestions refer to missing review: %s" % directory.name
+                    )
+                suggestion_count += len(self.load_suggestions(directory.name))
+        review_run_count = sum(1 for _ in self.iter_review_run_manifests())
         index_dir = self.knowledge_dir / "_index"
         if index_dir.exists():
             link_pattern = re.compile(r"\]\((\.\./[^)#]+\.md)\)")
@@ -461,6 +647,8 @@ class KnowledgeRepository:
             "review_items": review_count,
             "source_states": state_count,
             "run_manifests": run_count,
+            "suggestions": suggestion_count,
+            "review_run_manifests": review_run_count,
         }
         # A machine index is optional and never authoritative. When present,
         # report its state so callers can rebuild instead of trusting drift.
@@ -469,9 +657,13 @@ class KnowledgeRepository:
         result["machine_index_status"] = machine_index_status(self)
         return result
 
-    def commit(self, changes: Dict[Path, bytes]) -> List[str]:
-        """Apply a validated multi-file change set and roll back on failure."""
-        if not changes:
+    def commit(
+        self,
+        changes: Dict[Path, bytes],
+        deletes: Sequence[Path] = (),
+    ) -> List[str]:
+        """Apply validated writes/deletions as one transaction and roll back on failure."""
+        if not changes and not deletes:
             return []
         normalized: Dict[Path, bytes] = {}
         for path, data in changes.items():
@@ -481,15 +673,41 @@ class KnowledgeRepository:
             except ValueError as exc:
                 raise StorageError("transaction target escapes repository: %s" % path) from exc
             normalized[path] = data
+        normalized_deletes = []
+        seen_deletes = set()
+        for path in deletes:
+            path = Path(path).resolve()
+            try:
+                path.relative_to(self.root)
+            except ValueError as exc:
+                raise StorageError(
+                    "transaction deletion escapes repository: %s" % path
+                ) from exc
+            if path in normalized:
+                raise StorageError("transaction may not write and delete %s" % path)
+            if path in seen_deletes:
+                raise StorageError("duplicate transaction deletion target: %s" % path)
+            if not path.is_file():
+                raise StorageError("transaction deletion target is missing: %s" % path)
+            seen_deletes.add(path)
+            normalized_deletes.append(path)
 
         transaction_dir = Path(tempfile.mkdtemp(prefix=".knowledge-txn-", dir=str(self.root)))
         staged = transaction_dir / "staged"
         backups = transaction_dir / "backups"
         applied: List[Tuple[Path, Optional[Path]]] = []
         try:
-            for index, (target, data) in enumerate(sorted(normalized.items(), key=lambda item: str(item[0]))):
+            operations = [
+                (target, data)
+                for target, data in sorted(normalized.items(), key=lambda item: str(item[0]))
+            ]
+            operations.extend(
+                (target, None) for target in sorted(normalized_deletes, key=str)
+            )
+            for index, (target, data) in enumerate(operations):
                 stage_path = staged / str(index)
-                atomic_write(stage_path, data)
+                if data is not None:
+                    atomic_write(stage_path, data)
                 backup = None
                 if target.exists():
                     backup = backups / str(index)
@@ -497,9 +715,14 @@ class KnowledgeRepository:
                     shutil.copy2(str(target), str(backup))
                 target.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    os.replace(str(stage_path), str(target))
+                    if data is None:
+                        target.unlink()
+                    else:
+                        os.replace(str(stage_path), str(target))
                 except OSError as exc:
-                    raise StorageError("atomic replace failed for %s: %s" % (target, exc)) from exc
+                    raise StorageError(
+                        "transaction operation failed for %s: %s" % (target, exc)
+                    ) from exc
                 applied.append((target, backup))
         except Exception:
             rollback_errors = []
@@ -516,7 +739,8 @@ class KnowledgeRepository:
             raise
         finally:
             shutil.rmtree(str(transaction_dir), ignore_errors=True)
-        return [self._relative(path) for path in sorted(normalized, key=str)]
+        touched = set(normalized) | set(normalized_deletes)
+        return [self._relative(path) for path in sorted(touched, key=str)]
 
     def write_manifest(self, path: Path, manifest: Dict[str, Any]) -> None:
         validate_run_manifest(manifest)

@@ -81,7 +81,13 @@ def openrouter_configuration(value: Optional[str]) -> Dict[str, str]:
         return {}
     return {
         key: parser.get("openrouter", key, fallback="").strip()
-        for key in ("api_key", "model", "ask_model")
+        for key in (
+            "api_key",
+            "model",
+            "ask_model",
+            "review_model",
+            "review_critic_model",
+        )
         if parser.get("openrouter", key, fallback="").strip()
     }
 

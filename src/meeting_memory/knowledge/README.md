@@ -32,7 +32,9 @@ The resulting layout is:
 <output-dir>/
   knowledge/<category>/*.md       # OUTPUT: curated canonical objects
   knowledge-review/pending/*.md   # OUTPUT: conflicts needing a human
-  .knowledge-state/               # OUTPUT: per-source + per-run state
+  knowledge-review/suggestions/   # OUTPUT: append-only AI advice
+  .knowledge-state/review-runs/   # OUTPUT: AI suggestion batch manifests
+  .knowledge-state/               # OUTPUT: per-source + ingestion-run state
   outputs/Durable-Knowledge/      # OUTPUT: context packets, saved answers
   logs/
 ```
@@ -155,11 +157,12 @@ attendees: ["alice@example.com", "bob@example.com"]
 
 ## Which commands need an API key
 
-Extraction and `ask` call an OpenRouter/Anthropic-compatible endpoint and need a
-key plus a model:
+Extraction, `ask`, and `review suggest` call an
+OpenRouter/Anthropic-compatible endpoint and need a key plus a model:
 
 - Preferred local setup: `[openrouter]` in the git-ignored
-  `meeting-memory.ini`, with `api_key`, `model`, and optional `ask_model`.
+  `meeting-memory.ini`, with `api_key`, `model`, and optional `ask_model` /
+  `review_model`.
 - Compatibility environment key: `OPENROUTER_API_KEY` or
   `ANTHROPIC_AUTH_TOKEN`.
 - Compatibility environment model: `DAILY_KNOWLEDGE_ASK_MODEL` /
@@ -171,6 +174,7 @@ key plus a model:
 | `sync-sources` | no OpenRouter key; Slack token when channels are configured | writes Slack snapshots |
 | `process-date` / `process-pending` | yes | yes (extracts Meet + Slack) |
 | `ask` | yes | no (reads curated `knowledge/`) |
+| `review suggest` | yes | reads pending reviews and evidence; writes only suggestions and review-run manifests |
 | `search` / `show` / `context` | no | no (reads curated `knowledge/`) |
 | `index` / `status` / `validate` | no | `status` scans note dates only |
 
@@ -221,6 +225,62 @@ meeting-memory index      # rebuild knowledge/README.md + _index/
 # 5. Ask a question over the curated layer (needs key)
 meeting-memory ask "What is the withdrawal approval policy?"
 ```
+
+## Reviewing conflicts and ambiguous candidates
+
+Do not edit raw meeting or Slack files to resolve a review case. They are the
+evidence layer, and changing them invalidates stored fingerprints and line
+ranges. Use the review commands to make an explicit, audited decision:
+
+```bash
+meeting-memory review list
+meeting-memory review list --priority conflict --limit 20
+meeting-memory review suggest --priority conflict --all
+meeting-memory review show REVIEW_ID --with-evidence
+meeting-memory review show REVIEW_ID --with-evidence --with-suggestion
+meeting-memory review resolve REVIEW_ID \
+  --action refine \
+  --reviewer "Rui" \
+  --note "Confirmed with the project owner." \
+  --dry-run
+```
+
+`review suggest` performs an advisory first pass. It packages the complete
+semantic review, every possible canonical target and structural duplicate,
+line-numbered evidence plus bounded context, and stale/unreadable flags as
+untrusted reference data. Its exact credential-free provider request and
+diagnostic fingerprints are stored in an append-only artifact. Re-running
+reuses an artifact only when that exact request fingerprint matches; `--force`
+writes another artifact without overwriting history.
+
+The reviewer model resolves in this order: `--model`,
+`MEETING_MEMORY_REVIEW_MODEL`, `[openrouter] review_model`, then `ask_model`.
+It deliberately does not fall back to the extraction model. Suggestion batches
+continue after individual provider or validation failures and return nonzero
+when any review fails. This advisory phase cannot accept a suggestion or
+change canonical knowledge; the explicit human resolution commands below
+remain authoritative.
+
+After checking the dry-run, repeat without `--dry-run`. Available actions:
+
+- `replace`: replace the matched canonical statement and candidate metadata;
+- `refine`: merge the candidate into the matched canonical object;
+- `reconfirm`: retain the canonical statement and append candidate evidence;
+- `create-separate`: create a distinct canonical object;
+- `keep-existing`: reject the candidate and retain canonical knowledge;
+- `merge-duplicate`: reject this case as a duplicate of another pending case
+  selected with `--duplicate-of`.
+
+`--existing-id` selects a canonical target when matching was ambiguous.
+`create-separate` accepts `--new-id`. Metadata can be reviewed with `--title`,
+`--status`, `--confidence`, `--owner`, and `--effective-date`. Older review
+files require explicit `--status` and `--confidence` when creating a separate
+object because those candidate fields were not preserved historically.
+
+Canonical and review-file changes are committed together. Resolutions record
+the reviewer, timestamp, action, rationale, and affected object IDs; then the
+browse and machine indexes are regenerated. The command refuses stale
+canonical snapshots and stale evidence by default.
 
 ## Adapting notes from another source
 

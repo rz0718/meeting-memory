@@ -8,7 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .constants import CATEGORIES, CONFIDENCES, OUTCOMES, RUN_STATUSES, STATUSES
+from .constants import (
+    CATEGORIES,
+    CONFIDENCES,
+    OUTCOMES,
+    REVIEW_ACTIONS,
+    REVIEW_STATUSES,
+    RUN_STATUSES,
+    STATUSES,
+)
 from .errors import SchemaError
 
 
@@ -189,6 +197,21 @@ class KnowledgeCandidate:
             relationship=relationship,
         )
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "category": self.category,
+            "title": self.title,
+            "statement": self.statement,
+            "status": self.status,
+            "effective_date": self.effective_date,
+            "owner": self.owner,
+            "confidence": self.confidence,
+            "reason_for_durability": self.reason_for_durability,
+            "evidence": [item.to_dict() for item in self.evidence],
+            "existing_object_id": self.existing_object_id,
+            "relationship": self.relationship,
+        }
+
 
 @dataclass
 class KnowledgeObject:
@@ -311,13 +334,24 @@ class ReviewItem:
     explanation: str
     existing_evidence: List[Evidence] = field(default_factory=list)
     candidate_evidence: List[Evidence] = field(default_factory=list)
+    candidate: Optional[KnowledgeCandidate] = None
+    existing_updated_at: Optional[str] = None
+    existing_statement_sha256: Optional[str] = None
+    resolved_at: Optional[str] = None
+    reviewer: Optional[str] = None
+    resolution_action: Optional[str] = None
+    resolution_note: Optional[str] = None
+    affected_object_ids: List[str] = field(default_factory=list)
+    duplicate_of: Optional[str] = None
+    allowed_stale_evidence: bool = False
+    path: Optional[Path] = None
 
     @classmethod
     def from_dict(cls, raw: Any, **body: Any) -> "ReviewItem":
         if not isinstance(raw, dict):
             raise SchemaError("review front matter must be an object")
         status = _required_string(raw.get("status"), "review.status")
-        if status not in ("pending", "resolved", "rejected"):
+        if status not in REVIEW_STATUSES:
             raise SchemaError("invalid review status")
         category = _required_string(raw.get("candidate_category"), "review.candidate_category")
         if category not in CATEGORIES:
@@ -328,6 +362,100 @@ class ReviewItem:
             raise SchemaError("review.possible_existing_ids must be a string list")
         if not isinstance(sources, list) or not sources or not all(isinstance(item, str) for item in sources):
             raise SchemaError("review.sources must be a non-empty string list")
+        candidate = None
+        candidate_raw = raw.get("candidate")
+        if candidate_raw is not None:
+            candidate = KnowledgeCandidate.from_dict(candidate_raw)
+            if candidate.category != category:
+                raise SchemaError("review candidate category does not match candidate snapshot")
+
+        existing_updated_at = None
+        existing_statement_sha256 = None
+        existing_snapshot = raw.get("existing_snapshot")
+        if existing_snapshot is not None:
+            if not isinstance(existing_snapshot, dict):
+                raise SchemaError("review.existing_snapshot must be an object")
+            existing_updated_at = _timestamp(
+                existing_snapshot.get("updated_at"),
+                "review.existing_snapshot.updated_at",
+            )
+            existing_statement_sha256 = _required_string(
+                existing_snapshot.get("statement_sha256"),
+                "review.existing_snapshot.statement_sha256",
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", existing_statement_sha256):
+                raise SchemaError(
+                    "review.existing_snapshot.statement_sha256 must be a SHA-256 digest"
+                )
+
+        resolution = raw.get("resolution")
+        resolved_at = None
+        reviewer = None
+        resolution_action = None
+        resolution_note = None
+        affected_object_ids: List[str] = []
+        duplicate_of = None
+        allowed_stale_evidence = False
+        if resolution is not None:
+            if not isinstance(resolution, dict):
+                raise SchemaError("review.resolution must be an object")
+            resolved_at = _timestamp(
+                resolution.get("resolved_at"), "review.resolution.resolved_at"
+            )
+            reviewer = _required_string(
+                resolution.get("reviewer"), "review.resolution.reviewer"
+            )
+            resolution_action = _required_string(
+                resolution.get("action"), "review.resolution.action"
+            )
+            if resolution_action not in REVIEW_ACTIONS:
+                raise SchemaError("review.resolution.action is not allowed")
+            resolution_note = _required_string(
+                resolution.get("note"), "review.resolution.note"
+            )
+            affected = resolution.get("affected_object_ids", [])
+            if not isinstance(affected, list) or not all(
+                isinstance(item, str) for item in affected
+            ):
+                raise SchemaError(
+                    "review.resolution.affected_object_ids must be a string list"
+                )
+            affected_object_ids = list(affected)
+            duplicate_of = _nullable_string(
+                resolution.get("duplicate_of"), "review.resolution.duplicate_of"
+            )
+            allowed_stale_evidence = resolution.get(
+                "allowed_stale_evidence", False
+            )
+            if not isinstance(allowed_stale_evidence, bool):
+                raise SchemaError(
+                    "review.resolution.allowed_stale_evidence must be boolean"
+                )
+        if status == "pending" and resolution is not None:
+            raise SchemaError("pending review item may not contain a resolution")
+        if resolution_action in ("keep-existing", "merge-duplicate") and status != "rejected":
+            raise SchemaError(
+                "keep-existing and merge-duplicate resolutions must be rejected"
+            )
+        if (
+            resolution_action is not None
+            and resolution_action not in ("keep-existing", "merge-duplicate")
+            and status != "resolved"
+        ):
+            raise SchemaError("accepted review resolution must have resolved status")
+
+        candidate_statement = _required_string(
+            body.get("candidate_statement"), "review.candidate_statement"
+        )
+        candidate_evidence = list(body.get("candidate_evidence") or [])
+        existing_evidence = list(body.get("existing_evidence") or [])
+        if candidate is not None:
+            if candidate.statement != candidate_statement:
+                raise SchemaError(
+                    "review candidate snapshot and Markdown statement differ"
+                )
+            candidate_evidence = list(candidate.evidence)
+
         return cls(
             id=_required_string(raw.get("id"), "review.id"),
             created_at=_timestamp(raw.get("created_at"), "review.created_at"),
@@ -338,14 +466,25 @@ class ReviewItem:
             sources=sources,
             title=_required_string(body.get("title"), "review.title"),
             existing_statement=body.get("existing_statement"),
-            candidate_statement=_required_string(
-                body.get("candidate_statement"), "review.candidate_statement"
-            ),
+            candidate_statement=candidate_statement,
             explanation=_required_string(body.get("explanation"), "review.explanation"),
+            existing_evidence=existing_evidence,
+            candidate_evidence=candidate_evidence,
+            candidate=candidate,
+            existing_updated_at=existing_updated_at,
+            existing_statement_sha256=existing_statement_sha256,
+            resolved_at=resolved_at,
+            reviewer=reviewer,
+            resolution_action=resolution_action,
+            resolution_note=resolution_note,
+            affected_object_ids=affected_object_ids,
+            duplicate_of=duplicate_of,
+            allowed_stale_evidence=allowed_stale_evidence,
+            path=body.get("path"),
         )
 
     def to_frontmatter(self) -> Dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "created_at": self.created_at,
             "status": self.status,
@@ -354,6 +493,24 @@ class ReviewItem:
             "possible_existing_ids": list(self.possible_existing_ids),
             "sources": list(self.sources),
         }
+        if self.candidate is not None:
+            result["candidate"] = self.candidate.to_dict()
+        if self.existing_updated_at and self.existing_statement_sha256:
+            result["existing_snapshot"] = {
+                "updated_at": self.existing_updated_at,
+                "statement_sha256": self.existing_statement_sha256,
+            }
+        if self.resolution_action:
+            result["resolution"] = {
+                "resolved_at": self.resolved_at,
+                "reviewer": self.reviewer,
+                "action": self.resolution_action,
+                "note": self.resolution_note,
+                "affected_object_ids": list(self.affected_object_ids),
+                "duplicate_of": self.duplicate_of,
+                "allowed_stale_evidence": self.allowed_stale_evidence,
+            }
+        return result
 
 
 def validate_source_state(raw: Any) -> None:
@@ -436,3 +593,87 @@ def validate_run_manifest(raw: Any) -> None:
     for key in ("candidates_rejected", "errors"):
         if not all(isinstance(item, dict) for item in raw[key]):
             raise SchemaError("run.%s must contain objects" % key)
+
+
+def validate_review_run_manifest(raw: Any) -> None:
+    """Validate an AI-review run without treating it as an ingestion run."""
+    if not isinstance(raw, dict):
+        raise SchemaError("review run manifest must be an object")
+    required = {
+        "schema_version",
+        "run_type",
+        "run_id",
+        "started_at",
+        "completed_at",
+        "status",
+        "model",
+        "prompt_version",
+        "filters",
+        "requested_review_ids",
+        "suggestions_created",
+        "suggestions_reused",
+        "failures",
+    }
+    if set(raw) != required:
+        raise SchemaError("review run manifest has missing or unknown fields")
+    if raw["schema_version"] != "1" or raw["run_type"] != "review_suggestions":
+        raise SchemaError("review run manifest has an unsupported schema or type")
+    _required_string(raw["run_id"], "review_run.run_id")
+    _timestamp(raw["started_at"], "review_run.started_at")
+    _timestamp(raw["completed_at"], "review_run.completed_at")
+    if raw["status"] not in RUN_STATUSES:
+        raise SchemaError("review run manifest has invalid status")
+    _required_string(raw["model"], "review_run.model")
+    _required_string(raw["prompt_version"], "review_run.prompt_version")
+    if not isinstance(raw["filters"], dict):
+        raise SchemaError("review_run.filters must be an object")
+    requested = raw["requested_review_ids"]
+    if (
+        not isinstance(requested, list)
+        or not all(isinstance(item, str) and item for item in requested)
+        or len(requested) != len(set(requested))
+    ):
+        raise SchemaError("review_run.requested_review_ids must be unique strings")
+    for key in ("suggestions_created", "suggestions_reused"):
+        value = raw[key]
+        if not isinstance(value, dict) or not all(
+            isinstance(review_id, str)
+            and review_id
+            and isinstance(suggestion_id, str)
+            and suggestion_id
+            for review_id, suggestion_id in value.items()
+        ):
+            raise SchemaError("review_run.%s must map review IDs to suggestion IDs" % key)
+    failures = raw["failures"]
+    if not isinstance(failures, list):
+        raise SchemaError("review_run.failures must be an array")
+    failed_ids = []
+    for failure in failures:
+        if not isinstance(failure, dict) or set(failure) != {
+            "review_id",
+            "error_type",
+            "error",
+        }:
+            raise SchemaError("review_run.failures entries have invalid fields")
+        failed_ids.append(_required_string(failure["review_id"], "failure.review_id"))
+        _required_string(failure["error_type"], "failure.error_type")
+        _required_string(failure["error"], "failure.error")
+    buckets = (
+        list(raw["suggestions_created"])
+        + list(raw["suggestions_reused"])
+        + failed_ids
+    )
+    if len(buckets) != len(set(buckets)) or set(buckets) != set(requested):
+        raise SchemaError(
+            "every requested review must appear exactly once in review-run results"
+        )
+    succeeded = len(raw["suggestions_created"]) + len(raw["suggestions_reused"])
+    expected_status = (
+        "success"
+        if not failures
+        else ("partial_failure" if succeeded else "failed")
+    )
+    if raw["status"] != expected_status:
+        raise SchemaError(
+            "review run status must be derived from its result buckets"
+        )

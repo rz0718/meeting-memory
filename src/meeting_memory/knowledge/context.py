@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .consumption import SearchDocument, normalize_phrase, normalize_query, tokenize
+from .consumption import SearchDocument, normalize_phrase, normalize_query, stemmed
 from .errors import KnowledgeError
 from .models import ReviewItem
 from .presentation import EvidenceExcerpt, evidence_excerpts
@@ -156,11 +156,11 @@ def _strong_text_match(query: str, value: str) -> bool:
     query_value = normalize_query(query)
     if query_value.phrase and query_value.phrase in normalize_phrase(value):
         return True
-    query_tokens = set(query_value.tokens)
-    if not query_tokens:
+    query_stems = set(query_value.stems)
+    if not query_stems:
         return False
-    matched = query_tokens & set(tokenize(value))
-    return len(matched) >= max(1, (len(query_tokens) + 1) // 2)
+    matched = query_stems & set(stemmed(value))
+    return len(matched) >= max(1, (len(query_stems) + 1) // 2)
 
 
 def connected_reviews(

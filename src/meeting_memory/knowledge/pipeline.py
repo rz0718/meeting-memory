@@ -17,7 +17,17 @@ from .extractors import KnowledgeExtractor
 from .models import Evidence, KnowledgeCandidate, KnowledgeObject, ReviewItem
 from .reconcile import KnowledgeReconciler, knowledge_id
 from .repository import KnowledgeRepository
-from .util import iso_z, json_bytes, local_today, normalize_text, run_id, sha256_file, slugify, utc_now
+from .util import (
+    iso_z,
+    json_bytes,
+    local_today,
+    normalize_text,
+    run_id,
+    sha256_bytes,
+    sha256_file,
+    slugify,
+    utc_now,
+)
 
 
 @dataclass
@@ -212,6 +222,11 @@ class KnowledgePipeline:
             explanation=explanation,
             existing_evidence=copy.deepcopy(existing.evidence if existing else []),
             candidate_evidence=copy.deepcopy(candidate.evidence),
+            candidate=copy.deepcopy(candidate),
+            existing_updated_at=existing.updated_at if existing else None,
+            existing_statement_sha256=(
+                sha256_bytes(existing.statement.encode("utf-8")) if existing else None
+            ),
         )
 
     def _apply_candidate(

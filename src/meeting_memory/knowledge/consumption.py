@@ -71,17 +71,49 @@ def tokenize(value: str, remove_stop_words: bool = False) -> Tuple[str, ...]:
     return tokens
 
 
+def stem(token: str) -> str:
+    """Fold an English plural onto its singular form.
+
+    Deliberately limited to noun plurals. Verb inflection (``-ed`` / ``-ing``)
+    is out of scope: it needs silent-``e`` restoration to be symmetric, and
+    over-stemming would let two distinct terms collapse onto one stem and
+    match each other. Short, non-alphabetic, and ``-ss`` / ``-us`` / ``-is``
+    tokens are left alone so ``sla``, ``50k``, ``process``, ``status``, and
+    ``analysis`` survive intact.
+    """
+    if len(token) <= 3 or not token.isalpha():
+        return token
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith(("sses", "ches", "shes", "xes", "zes")):
+        return token[:-2]
+    if token.endswith("s") and not token.endswith(("ss", "us", "is")):
+        return token[:-1]
+    return token
+
+
+def stemmed(value: str, remove_stop_words: bool = False) -> Tuple[str, ...]:
+    return tuple(stem(token) for token in tokenize(value, remove_stop_words))
+
+
 @dataclass(frozen=True)
 class NormalizedQuery:
     original: str
     phrase: str
     tokens: Tuple[str, ...]
+    stems: Tuple[str, ...] = ()
 
 
 def normalize_query(value: str) -> NormalizedQuery:
     original = normalize_display(value)
     phrase = normalize_phrase(value)
-    return NormalizedQuery(original=original, phrase=phrase, tokens=tokenize(value, True))
+    tokens = tokenize(value, True)
+    return NormalizedQuery(
+        original=original,
+        phrase=phrase,
+        tokens=tokens,
+        stems=tuple(stem(token) for token in tokens),
+    )
 
 
 @dataclass(frozen=True)

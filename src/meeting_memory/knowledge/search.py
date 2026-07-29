@@ -13,7 +13,7 @@ from .consumption import (
     SearchDocument,
     normalize_phrase,
     normalize_query,
-    tokenize,
+    stemmed,
 )
 
 
@@ -90,9 +90,21 @@ class SearchResult:
         }
 
 
-def _contains_tokens(value: str, tokens: Sequence[str]) -> Tuple[str, ...]:
-    values = set(tokenize(value))
-    return tuple(token for token in tokens if token in values)
+def _matched_tokens(value: str, query: NormalizedQuery) -> Tuple[str, ...]:
+    """Query terms whose stem occurs in ``value``, reported in the user's wording.
+
+    Matching is on stems so ``withdrawals`` finds ``withdrawal``, but the
+    original token is returned so score reasons stay readable. Terms sharing a
+    stem count once, keeping ``withdrawal withdrawals`` worth one match.
+    """
+    values = set(stemmed(value))
+    matched = []
+    seen = set()
+    for token, token_stem in zip(query.tokens, query.stems):
+        if token_stem in values and token_stem not in seen:
+            seen.add(token_stem)
+            matched.append(token)
+    return tuple(matched)
 
 
 def _matches(document: SearchDocument, filters: SearchFilters) -> bool:
@@ -139,7 +151,6 @@ def score_document(
     score = 0
     matched: Dict[str, bool] = {}
     reasons: List[str] = []
-    tokens = query.tokens
 
     id_phrase = normalize_phrase(document.id)
     title_phrase = normalize_phrase(document.title)
@@ -148,7 +159,7 @@ def score_document(
         matched["id"] = True
         reasons.append("exact ID (+100)")
     else:
-        id_tokens = _contains_tokens(document.id, tokens)
+        id_tokens = _matched_tokens(document.id, query)
         if id_tokens:
             matched["id"] = True
 
@@ -161,13 +172,13 @@ def score_document(
         matched["title"] = True
         reasons.append("title phrase (+50)")
 
-    title_tokens = _contains_tokens(document.title, tokens)
+    title_tokens = _matched_tokens(document.title, query)
     if title_tokens:
         score += 12 * len(title_tokens)
         matched["title"] = True
         reasons.append("title tokens %s (+%d)" % (", ".join(title_tokens), 12 * len(title_tokens)))
 
-    statement_tokens = _contains_tokens(document.statement, tokens)
+    statement_tokens = _matched_tokens(document.statement, query)
     if statement_tokens:
         score += 5 * len(statement_tokens)
         matched["statement"] = True
@@ -179,27 +190,27 @@ def score_document(
     owner_phrase = normalize_phrase(document.owner or "")
     if document.owner and (
         (query.phrase and query.phrase in owner_phrase)
-        or _contains_tokens(document.owner, tokens)
+        or _matched_tokens(document.owner, query)
     ):
         score += 10
         matched["owner"] = True
         reasons.append("owner (+10)")
 
     category_phrase = normalize_phrase(document.category)
-    if (query.phrase and query.phrase == category_phrase) or _contains_tokens(
-        document.category, tokens
+    if (query.phrase and query.phrase == category_phrase) or _matched_tokens(
+        document.category, query
     ):
         score += 8
         matched["category"] = True
         reasons.append("category (+8)")
 
-    if (query.phrase and query.phrase == normalize_phrase(document.status)) or _contains_tokens(
-        document.status, tokens
+    if (query.phrase and query.phrase == normalize_phrase(document.status)) or _matched_tokens(
+        document.status, query
     ):
         matched["status"] = True
 
     related_text = " ".join(document.related_objects)
-    related_tokens = _contains_tokens(related_text, tokens)
+    related_tokens = _matched_tokens(related_text, query)
     if related_tokens:
         score += 8
         matched["related_objects"] = True
@@ -208,15 +219,15 @@ def score_document(
     evidence_names = " ".join(
         PurePosixPath(value).name for value in document.evidence_sources
     )
-    evidence_tokens = _contains_tokens(evidence_names, tokens)
+    evidence_tokens = _matched_tokens(evidence_names, query)
     if evidence_tokens:
         score += 4
         matched["evidence_sources"] = True
         reasons.append("evidence filename (+4)")
 
-    if _contains_tokens(document.history_text, tokens):
+    if _matched_tokens(document.history_text, query):
         matched["history"] = True
-    if _contains_tokens(document.manual_notes, tokens):
+    if _matched_tokens(document.manual_notes, query):
         matched["manual_notes"] = True
 
     textual_match = bool(matched)

@@ -13,6 +13,11 @@ api_key =
 model = provider/model-name
 # Optional; when blank, ask uses model above.
 ask_model =
+# Optional AI evidence reviewer. It falls back to ask_model, never to the
+# extraction model above.
+review_model =
+# Reserved for the later independent automation-verifier phase.
+review_critic_model =
 
 # Optional Slack source. The bot must be a member of every configured channel.
 # Use one channel ID per indented line, or a comma-separated list.
