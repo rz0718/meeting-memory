@@ -18,7 +18,7 @@ from .constants import (
     MANUAL_END,
     REVIEW_STATUSES,
 )
-from .errors import EvidenceError, SchemaError, StorageError
+from .errors import EvidenceError, SchemaError, StaleReviewError, StorageError
 from .models import (
     Evidence,
     KnowledgeObject,
@@ -661,6 +661,7 @@ class KnowledgeRepository:
         self,
         changes: Dict[Path, bytes],
         deletes: Sequence[Path] = (),
+        preconditions: Optional[Dict[Path, Optional[str]]] = None,
     ) -> List[str]:
         """Apply validated writes/deletions as one transaction and roll back on failure."""
         if not changes and not deletes:
@@ -692,6 +693,25 @@ class KnowledgeRepository:
             seen_deletes.add(path)
             normalized_deletes.append(path)
 
+        normalized_preconditions: Dict[Path, Optional[str]] = {}
+        for path, expected in (preconditions or {}).items():
+            path = Path(path).resolve()
+            try:
+                path.relative_to(self.root)
+            except ValueError as exc:
+                raise StorageError(
+                    "transaction precondition escapes repository: %s" % path
+                ) from exc
+            if path not in normalized and path not in seen_deletes:
+                raise StorageError(
+                    "transaction precondition is not a mutation target: %s" % path
+                )
+            if expected is not None and not re.fullmatch(r"[0-9a-f]{64}", expected):
+                raise StorageError(
+                    "transaction precondition must be a SHA-256 digest or null"
+                )
+            normalized_preconditions[path] = expected
+
         transaction_dir = Path(tempfile.mkdtemp(prefix=".knowledge-txn-", dir=str(self.root)))
         staged = transaction_dir / "staged"
         backups = transaction_dir / "backups"
@@ -704,6 +724,20 @@ class KnowledgeRepository:
             operations.extend(
                 (target, None) for target in sorted(normalized_deletes, key=str)
             )
+            # Check every target immediately before the first replacement. No
+            # repository write has occurred at this point.
+            for target, expected in normalized_preconditions.items():
+                if expected is None:
+                    if target.exists():
+                        raise StaleReviewError(
+                            "transaction target was created after it was loaded: %s"
+                            % self._relative(target)
+                        )
+                elif not target.is_file() or sha256_file(target) != expected:
+                    raise StaleReviewError(
+                        "transaction target changed after it was loaded: %s"
+                        % self._relative(target)
+                    )
             for index, (target, data) in enumerate(operations):
                 stage_path = staged / str(index)
                 if data is not None:

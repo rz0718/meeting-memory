@@ -366,6 +366,121 @@ class ReviewResolutionResult:
         }
 
 
+@dataclass(frozen=True)
+class ReviewRefreshResult:
+    review_id: str
+    existing_id: str
+    previous_statement: Optional[str]
+    current_statement: str
+    previous_updated_at: Optional[str]
+    current_updated_at: str
+    suggestions_made_stale: Tuple[str, ...]
+    changed_paths: Tuple[str, ...]
+    dry_run: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "review_id": self.review_id,
+            "existing_id": self.existing_id,
+            "previous_statement": self.previous_statement,
+            "current_statement": self.current_statement,
+            "previous_updated_at": self.previous_updated_at,
+            "current_updated_at": self.current_updated_at,
+            "suggestions_made_stale": list(self.suggestions_made_stale),
+            "changed_paths": list(self.changed_paths),
+            "dry_run": self.dry_run,
+        }
+
+
+class ReviewRefresher:
+    """Rebase only a pending review's existing-side canonical snapshot."""
+
+    def __init__(self, repository: KnowledgeRepository):
+        self.repository = repository
+
+    def refresh(
+        self,
+        review_id: str,
+        *,
+        existing_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> ReviewRefreshResult:
+        reviews = self.repository.load_reviews()
+        item = exact_review(self.repository, review_id, reviews)
+        if item.status != "pending":
+            raise ReviewResolutionError(
+                "only pending reviews can be refreshed: %s" % review_id
+            )
+        if item.path is None:
+            raise ReviewResolutionError("review item has no repository path")
+        if existing_id is None:
+            if len(item.possible_existing_ids) != 1:
+                raise ReviewResolutionError(
+                    "refresh requires --existing-id unless the review has exactly one possible object"
+                )
+            existing_id = item.possible_existing_ids[0]
+        if existing_id not in item.possible_existing_ids:
+            raise ReviewResolutionError(
+                "refresh cannot change review identity; existing object is not in the review snapshot"
+            )
+        target = next(
+            (
+                value
+                for value in self.repository.load_knowledge()
+                if value.id == existing_id
+            ),
+            None,
+        )
+        if target is None:
+            raise ReviewResolutionError(
+                "existing knowledge object not found: %s" % existing_id
+            )
+        if target.category != item.candidate_category:
+            raise ReviewResolutionError(
+                "existing object category does not match review candidate"
+            )
+
+        original_bytes = item.path.read_bytes()
+        previous_statement = item.existing_statement
+        previous_updated_at = item.existing_updated_at
+        refreshed = copy.deepcopy(item)
+        refreshed.existing_statement = target.statement
+        refreshed.existing_evidence = copy.deepcopy(target.evidence)
+        refreshed.existing_updated_at = target.updated_at
+        refreshed.existing_statement_sha256 = sha256_bytes(
+            target.statement.encode("utf-8")
+        )
+        rendered = self.repository.render_review(refreshed)
+        changed = rendered != original_bytes
+        changed_paths = (
+            (self.repository._relative(item.path),) if changed else ()
+        )
+        stale_suggestions = (
+            tuple(value.id for value in self.repository.load_suggestions(item.id))
+            if changed
+            else ()
+        )
+        result = ReviewRefreshResult(
+            review_id=item.id,
+            existing_id=target.id,
+            previous_statement=previous_statement,
+            current_statement=target.statement,
+            previous_updated_at=previous_updated_at,
+            current_updated_at=target.updated_at,
+            suggestions_made_stale=stale_suggestions,
+            changed_paths=changed_paths,
+            dry_run=dry_run,
+        )
+        if dry_run or not changed:
+            return result
+        self.repository.commit(
+            {item.path: rendered},
+            preconditions={item.path: sha256_bytes(original_bytes)},
+        )
+        self.repository.validate_all()
+        return result
+
+
 class ReviewResolver:
     """Apply one explicit human decision without modifying raw evidence."""
 
