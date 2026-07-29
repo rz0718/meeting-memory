@@ -16,7 +16,7 @@ from .errors import EvidenceError, KnowledgeError, SchemaError, StorageError
 from .extractors import KnowledgeExtractor
 from .models import Evidence, KnowledgeCandidate, KnowledgeObject, ReviewItem
 from .reconcile import KnowledgeReconciler, knowledge_id
-from .repository import KnowledgeRepository
+from .repository import KnowledgeRepository, mutation_locked
 from .util import (
     iso_z,
     json_bytes,
@@ -449,6 +449,7 @@ class KnowledgePipeline:
         )
         return text.encode("utf-8")
 
+    @mutation_locked
     def process_dates(
         self,
         target_dates: Sequence[str],

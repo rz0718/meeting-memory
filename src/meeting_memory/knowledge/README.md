@@ -118,11 +118,11 @@ Everything else in the date folder is treated as a durable-knowledge source.
 
   ```yaml
   ---
-  title: "Weekly Ops Review"
-  date: 2026-07-21
+  title: "Example Meeting"
+  date: 2099-01-01
   attendees:
-    - "alice@example.com"
-    - "bob@example.com"
+    - "person-a@example.test"
+    - "person-b@example.test"
   ---
   ```
 
@@ -139,20 +139,20 @@ Everything else in the date folder is treated as a durable-knowledge source.
 
 ### Minimal working example
 
-`<meetings-dir>/2026-07-21/weekly-ops-review.md`:
+`<meetings-dir>/2099-01-01/example-meeting.md`:
 
 ```markdown
 ---
-title: "Weekly Ops Review"
-date: 2026-07-21
-attendees: ["alice@example.com", "bob@example.com"]
+title: "Example Meeting"
+date: 2099-01-01
+attendees: ["person-a@example.test", "person-b@example.test"]
 ---
 
 # Notes
 
-- Decided withdrawals over $50k now require dual approval, effective Aug 1.
-  Owner: Treasury (Alice).
-- Migrated the settlement job to the new scheduler; old cron is deprecated.
+- Approved the updated operational workflow, effective next month.
+  Owner: Example Team.
+- Migrated the example job to the new scheduler; the old job is deprecated.
 ```
 
 ## Which commands need an API key
@@ -238,9 +238,10 @@ meeting-memory review list --priority conflict --limit 20
 meeting-memory review suggest --priority conflict --all
 meeting-memory review show REVIEW_ID --with-evidence
 meeting-memory review show REVIEW_ID --with-evidence --with-suggestion
+meeting-memory review triage --priority conflict --reviewer "Reviewer Name"
 meeting-memory review resolve REVIEW_ID \
   --action refine \
-  --reviewer "Rui" \
+  --reviewer "Reviewer Name" \
   --note "Confirmed with the project owner." \
   --dry-run
 ```
@@ -257,9 +258,25 @@ The reviewer model resolves in this order: `--model`,
 `MEETING_MEMORY_REVIEW_MODEL`, `[openrouter] review_model`, then `ask_model`.
 It deliberately does not fall back to the extraction model. Suggestion batches
 continue after individual provider or validation failures and return nonzero
-when any review fails. This advisory phase cannot accept a suggestion or
-change canonical knowledge; the explicit human resolution commands below
-remain authoritative.
+when any review fails. Suggestion generation cannot change canonical knowledge
+or review status; the explicit human resolution commands below remain
+authoritative.
+
+Accept a current suggestion exactly with:
+
+```bash
+meeting-memory review resolve REVIEW_ID \
+  --suggestion-id SUGGESTION_ID \
+  --accept-suggestion \
+  --reviewer "Reviewer Name" \
+  --note "Checked the cited evidence and approve the proposed result." \
+  --dry-run
+```
+
+Or include both `--suggestion-id` and an explicit `--action` to modify the
+recommendation. The resolver records that suggestion as `overridden`.
+`review triage` provides the same flow interactively: accept, override, defer,
+or quit; preview; then confirm before apply.
 
 After checking the dry-run, repeat without `--dry-run`. Available actions:
 
@@ -278,9 +295,16 @@ files require explicit `--status` and `--confidence` when creating a separate
 object because those candidate fields were not preserved historically.
 
 Canonical and review-file changes are committed together. Resolutions record
-the reviewer, timestamp, action, rationale, and affected object IDs; then the
-browse and machine indexes are regenerated. The command refuses stale
-canonical snapshots and stale evidence by default.
+the reviewer, timestamp, final action, rationale, affected object IDs, and,
+when applicable, the suggestion ID, AI action, and accepted/overridden
+disposition; then the browse and machine indexes are regenerated. The command
+refuses stale suggestions, canonical snapshots, and evidence by default.
+
+Every Meeting Memory writer honors the repository mutation lock. Apply reloads
+and verifies its inputs under that lock, then checks path digests or expected
+absence immediately before the first transaction write. Dry-run never grants
+authority to a later apply; apply repeats all checks. Direct external editors
+do not honor the advisory lock, so commit-time preconditions remain required.
 
 When canonical drift blocks a decision, inspect the current canonical object
 and rebase only the pending review's existing-side snapshot:

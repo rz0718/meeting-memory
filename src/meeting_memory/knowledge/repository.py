@@ -7,6 +7,9 @@ import os
 import re
 import shutil
 import tempfile
+import threading
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -37,6 +40,32 @@ from .util import (
     slugify,
 )
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Meeting Memory currently targets Unix.
+    fcntl = None
+
+
+_MUTATION_LOCKS: Dict[str, threading.RLock] = {}
+_MUTATION_LOCKS_GUARD = threading.Lock()
+_MUTATION_LOCK_STATE = threading.local()
+
+
+def mutation_locked(function):
+    """Hold the repository mutation lock for an entire writer operation."""
+
+    @wraps(function)
+    def wrapped(first, *args, **kwargs):
+        repository = (
+            first
+            if isinstance(first, KnowledgeRepository)
+            else getattr(first, "repository")
+        )
+        with repository.mutation_lock():
+            return function(first, *args, **kwargs)
+
+    return wrapped
+
 
 class KnowledgeRepository:
     """Owns meeting-note input and generated memory data.
@@ -66,6 +95,43 @@ class KnowledgeRepository:
         self.review_run_dir = self.state_dir / "review-runs"
         self.outputs_dir = self.root / "outputs" / "Durable-Knowledge"
         self.logs_dir = self.root / "logs"
+
+    @contextmanager
+    def mutation_lock(self):
+        """Serialize all canonical, review, evidence, and index mutations."""
+        lock_path = (self.state_dir / "mutation.lock").resolve()
+        key = str(lock_path)
+        with _MUTATION_LOCKS_GUARD:
+            process_lock = _MUTATION_LOCKS.setdefault(key, threading.RLock())
+        with process_lock:
+            depths = getattr(_MUTATION_LOCK_STATE, "depths", None)
+            if depths is None:
+                depths = {}
+                _MUTATION_LOCK_STATE.depths = depths
+            if depths.get(key, 0):
+                depths[key] += 1
+                try:
+                    yield
+                finally:
+                    depths[key] -= 1
+                return
+
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("a+b")
+            try:
+                if fcntl is None:
+                    raise StorageError(
+                        "repository mutation locking is unavailable on this platform"
+                    )
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                depths[key] = 1
+                try:
+                    yield
+                finally:
+                    depths.pop(key, None)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
 
     def ensure_layout(self) -> None:
         for category in CATEGORIES:
@@ -272,7 +338,14 @@ class KnowledgeRepository:
                 "- Resolved at: %s\n"
                 "- Affected objects: %s\n"
                 "- Duplicate of: %s\n"
-                "- Allowed stale evidence: %s\n\n"
+                "- Allowed stale evidence: %s\n"
+                "- Suggestion ID: %s\n"
+                "- Suggested action: %s\n"
+                "- Suggestion disposition: %s\n"
+                "- Resolution mode: %s\n"
+                "- Automation policy: %s\n"
+                "- Verifier suggestion ID: %s\n"
+                "- Verifier model: %s\n\n"
                 "%s"
                 % (
                     item.resolution_action,
@@ -282,6 +355,19 @@ class KnowledgeRepository:
                     or "None",
                     "`%s`" % item.duplicate_of if item.duplicate_of else "None",
                     "yes" if item.allowed_stale_evidence else "no",
+                    "`%s`" % item.suggestion_id if item.suggestion_id else "None",
+                    (
+                        "`%s`" % item.suggested_action
+                        if item.suggested_action
+                        else (
+                            "human_required" if item.suggestion_id else "None"
+                        )
+                    ),
+                    item.suggestion_disposition,
+                    item.resolution_mode,
+                    item.automation_policy or "None",
+                    item.verifier_suggestion_id or "None",
+                    item.verifier_model or "None",
                     item.resolution_note,
                 )
             )
@@ -437,6 +523,13 @@ class KnowledgeRepository:
                     "%s duplicates missing review item: %s"
                     % (item.id, item.duplicate_of)
                 )
+            if item.suggestion_id is not None:
+                suggestion = self.load_suggestion(item.id, item.suggestion_id)
+                if suggestion.recommendation.suggested_action != item.suggested_action:
+                    raise SchemaError(
+                        "%s resolution suggested action does not match artifact %s"
+                        % (item.id, item.suggestion_id)
+                    )
         return values
 
     def load_review_ids(self) -> set:
@@ -480,6 +573,7 @@ class KnowledgeRepository:
             values.append(self.load_suggestion(review_id, path.stem))
         return sorted(values, key=lambda value: (value.generated_at, value.id))
 
+    @mutation_locked
     def write_suggestion(self, suggestion: Any) -> str:
         from .review_suggestions import ReviewSuggestion
 
@@ -494,13 +588,17 @@ class KnowledgeRepository:
         path = self.suggestion_path(suggestion.review_id, suggestion.id)
         if path.exists():
             raise StorageError("suggestion artifact already exists: %s" % path)
-        atomic_write(path, json_bytes(suggestion.to_dict()))
+        self.commit(
+            {path: json_bytes(suggestion.to_dict())},
+            preconditions={path: None},
+        )
         return self._relative(path)
 
     def review_run_path(self, run_id: str) -> Path:
         run_id = self._artifact_id(run_id, "review run ID")
         return self.review_run_dir / ("%s.json" % run_id)
 
+    @mutation_locked
     def write_review_run_manifest(self, manifest: Dict[str, Any]) -> str:
         validate_review_run_manifest(manifest)
         path = self.review_run_path(manifest["run_id"])
@@ -509,7 +607,7 @@ class KnowledgeRepository:
         for bucket in ("suggestions_created", "suggestions_reused"):
             for review_id, suggestion_id in manifest[bucket].items():
                 self.load_suggestion(review_id, suggestion_id)
-        atomic_write(path, json_bytes(manifest))
+        self.commit({path: json_bytes(manifest)}, preconditions={path: None})
         return self._relative(path)
 
     def iter_review_run_manifests(self) -> Iterable[Tuple[Path, Dict[str, Any]]]:
@@ -657,6 +755,7 @@ class KnowledgeRepository:
         result["machine_index_status"] = machine_index_status(self)
         return result
 
+    @mutation_locked
     def commit(
         self,
         changes: Dict[Path, bytes],
@@ -696,15 +795,21 @@ class KnowledgeRepository:
         normalized_preconditions: Dict[Path, Optional[str]] = {}
         for path, expected in (preconditions or {}).items():
             path = Path(path).resolve()
+            in_root = False
+            in_meetings = False
             try:
                 path.relative_to(self.root)
-            except ValueError as exc:
+                in_root = True
+            except ValueError:
+                pass
+            try:
+                path.relative_to(self.meetings_dir)
+                in_meetings = True
+            except ValueError:
+                pass
+            if not in_root and not in_meetings:
                 raise StorageError(
                     "transaction precondition escapes repository: %s" % path
-                ) from exc
-            if path not in normalized and path not in seen_deletes:
-                raise StorageError(
-                    "transaction precondition is not a mutation target: %s" % path
                 )
             if expected is not None and not re.fullmatch(r"[0-9a-f]{64}", expected):
                 raise StorageError(
@@ -731,12 +836,12 @@ class KnowledgeRepository:
                     if target.exists():
                         raise StaleReviewError(
                             "transaction target was created after it was loaded: %s"
-                            % self._relative(target)
+                            % self._precondition_name(target)
                         )
                 elif not target.is_file() or sha256_file(target) != expected:
                     raise StaleReviewError(
                         "transaction target changed after it was loaded: %s"
-                        % self._relative(target)
+                        % self._precondition_name(target)
                     )
             for index, (target, data) in enumerate(operations):
                 stage_path = staged / str(index)
@@ -776,6 +881,19 @@ class KnowledgeRepository:
         touched = set(normalized) | set(normalized_deletes)
         return [self._relative(path) for path in sorted(touched, key=str)]
 
+    def _precondition_name(self, path: Path) -> str:
+        try:
+            return self._relative(path)
+        except SchemaError:
+            try:
+                return self.source_reference(path)
+            except SchemaError:
+                return str(path)
+
+    @mutation_locked
     def write_manifest(self, path: Path, manifest: Dict[str, Any]) -> None:
         validate_run_manifest(manifest)
-        atomic_write(path, json_bytes(manifest))
+        self.commit(
+            {path: json_bytes(manifest)},
+            preconditions={path: None},
+        )

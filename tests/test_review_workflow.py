@@ -3,12 +3,14 @@ import copy
 import datetime as dt
 import io
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from meeting_memory.knowledge.cli import main
 from meeting_memory.knowledge.errors import (
     ReviewResolutionError,
+    SchemaError,
     StaleReviewError,
 )
 from meeting_memory.knowledge.extractors import FakeExtractor
@@ -26,7 +28,12 @@ from meeting_memory.knowledge.review import (
     list_reviews,
 )
 from meeting_memory.knowledge.pipeline import KnowledgePipeline
-from meeting_memory.knowledge.util import sha256_bytes, sha256_file
+from meeting_memory.knowledge.util import (
+    dump_frontmatter,
+    parse_frontmatter,
+    sha256_bytes,
+    sha256_file,
+)
 
 
 FIXED_NOW = dt.datetime(2026, 7, 29, 8, 0, tzinfo=dt.timezone.utc)
@@ -390,6 +397,54 @@ class ReviewWorkflowTest(unittest.TestCase):
 
         self.assertEqual("changed concurrently", path.read_text(encoding="utf-8"))
 
+    def test_expected_absent_precondition_blocks_created_target(self):
+        target = self.repository.root / "unexpected-create.txt"
+        target.write_text("created concurrently", encoding="utf-8")
+
+        with self.assertRaises(StaleReviewError):
+            self.repository.commit(
+                {target: b"replacement"},
+                preconditions={target: None},
+            )
+
+        self.assertEqual(
+            "created concurrently", target.read_text(encoding="utf-8")
+        )
+
+    def test_read_only_external_evidence_precondition_blocks_every_write(self):
+        target = self.repository.root / "precondition-target.txt"
+        expected = sha256_file(self.source)
+        self.source.write_text("changed outside the repository", encoding="utf-8")
+
+        with self.assertRaises(StaleReviewError):
+            self.repository.commit(
+                {target: b"must not be written"},
+                preconditions={self.source: expected},
+            )
+
+        self.assertFalse(target.exists())
+
+    def test_repository_mutation_lock_serializes_repository_instances(self):
+        other = KnowledgeRepository(
+            self.repository.root,
+            meetings_dir=self.repository.meetings_dir,
+        )
+        attempted = threading.Event()
+        acquired = threading.Event()
+
+        def contender():
+            attempted.set()
+            with other.mutation_lock():
+                acquired.set()
+
+        with self.repository.mutation_lock():
+            thread = threading.Thread(target=contender)
+            thread.start()
+            self.assertTrue(attempted.wait(1))
+            self.assertFalse(acquired.wait(0.05))
+        thread.join(1)
+        self.assertTrue(acquired.is_set())
+
     def test_stale_candidate_evidence_requires_explicit_override(self):
         existing = self.make_object()
         self.make_review(existing=existing)
@@ -459,6 +514,96 @@ class ReviewWorkflowTest(unittest.TestCase):
             self.repository.review_dir / "rejected" / pending_path.name
         )
         self.assertEqual("keep-existing", rejected.resolution_action)
+        self.assertEqual("human", rejected.resolution_mode)
+        self.assertEqual("not_used", rejected.suggestion_disposition)
+        self.assertIsNone(rejected.suggestion_id)
+
+    def test_hybrid_resolution_audit_round_trip(self):
+        existing = self.make_object()
+        item, _ = self.make_review(existing=existing)
+        item.status = "rejected"
+        item.resolved_at = "2026-07-29T08:00:00Z"
+        item.reviewer = "Rui"
+        item.resolution_action = "keep-existing"
+        item.resolution_note = "The human accepted the AI recommendation."
+        item.affected_object_ids = [existing.id]
+        item.suggestion_id = "suggestion-test"
+        item.suggested_action = "keep-existing"
+        item.suggestion_disposition = "accepted"
+        item.resolution_mode = "hybrid"
+        path = self.repository.review_dir / "rejected" / ("%s.md" % item.id)
+        path.write_bytes(self.repository.render_review(item))
+
+        loaded = self.repository.load_review_file(path)
+        text = path.read_text(encoding="utf-8")
+
+        self.assertEqual("suggestion-test", loaded.suggestion_id)
+        self.assertEqual("keep-existing", loaded.suggested_action)
+        self.assertEqual("accepted", loaded.suggestion_disposition)
+        self.assertEqual("hybrid", loaded.resolution_mode)
+        self.assertIn("- Suggestion ID: `suggestion-test`", text)
+        self.assertIn("- Suggestion disposition: accepted", text)
+
+    def test_legacy_resolved_review_without_ai_audit_fields_still_loads(self):
+        existing = self.make_object()
+        _, pending_path = self.make_review(existing=existing)
+        self.resolver().resolve(
+            "review-framework",
+            "keep-existing",
+            "Rui",
+            "Legacy human decision.",
+        )
+        path = self.repository.review_dir / "rejected" / pending_path.name
+        raw, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        for key in (
+            "suggestion_id",
+            "suggested_action",
+            "suggestion_disposition",
+            "resolution_mode",
+            "automation_policy",
+            "verifier_suggestion_id",
+            "verifier_model",
+        ):
+            raw["resolution"].pop(key, None)
+        path.write_text(
+            "---\n%s\n---\n\n%s"
+            % (dump_frontmatter(raw), body.lstrip("\n")),
+            encoding="utf-8",
+        )
+
+        loaded = self.repository.load_review_file(path)
+
+        self.assertEqual("human", loaded.resolution_mode)
+        self.assertEqual("not_used", loaded.suggestion_disposition)
+        self.assertIsNone(loaded.suggestion_id)
+
+    def test_repository_rejects_resolution_with_missing_suggestion(self):
+        existing = self.make_object()
+        _, pending_path = self.make_review(existing=existing)
+        self.resolver().resolve(
+            "review-framework",
+            "keep-existing",
+            "Rui",
+            "Create a valid human resolution first.",
+        )
+        path = self.repository.review_dir / "rejected" / pending_path.name
+        raw, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        raw["resolution"].update(
+            {
+                "suggestion_id": "suggestion-missing",
+                "suggested_action": "keep-existing",
+                "suggestion_disposition": "accepted",
+                "resolution_mode": "hybrid",
+            }
+        )
+        path.write_text(
+            "---\n%s\n---\n\n%s"
+            % (dump_frontmatter(raw), body.lstrip("\n")),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(SchemaError):
+            self.repository.load_reviews()
 
     def test_legacy_create_separate_requires_explicit_status_and_confidence(self):
         self.make_review(existing=None, structured=False)

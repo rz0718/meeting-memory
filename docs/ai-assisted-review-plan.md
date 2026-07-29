@@ -154,7 +154,7 @@ The display should include:
 meeting-memory review resolve REVIEW_ID \
   --suggestion-id SUGGESTION_ID \
   --accept-suggestion \
-  --reviewer "Rui" \
+  --reviewer "Reviewer Name" \
   --note "Confirmed. The cited evidence supports the suggested decision." \
   --dry-run
 ```
@@ -171,7 +171,7 @@ the proposed note but is not silently treated as the human's comment.
 meeting-memory review resolve REVIEW_ID \
   --suggestion-id SUGGESTION_ID \
   --action replace \
-  --reviewer "Rui" \
+  --reviewer "Reviewer Name" \
   --note "Override: Treasury confirmed that the new target is approved." \
   --dry-run
 ```

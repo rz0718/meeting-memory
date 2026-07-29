@@ -10,7 +10,11 @@ from unittest import mock
 
 from meeting_memory.knowledge.cli import main
 from meeting_memory.knowledge.configuration import openrouter_configuration
-from meeting_memory.knowledge.errors import ExtractionError, SchemaError
+from meeting_memory.knowledge.errors import (
+    ExtractionError,
+    SchemaError,
+    StaleReviewError,
+)
 from meeting_memory.knowledge.models import (
     Evidence,
     KnowledgeCandidate,
@@ -19,6 +23,7 @@ from meeting_memory.knowledge.models import (
     validate_review_run_manifest,
 )
 from meeting_memory.knowledge.repository import KnowledgeRepository
+from meeting_memory.knowledge.review import ReviewResolver
 from meeting_memory.knowledge.review_ai import (
     FakeReviewAdvisor,
     OpenRouterReviewAdvisor,
@@ -34,6 +39,7 @@ from meeting_memory.knowledge.review_suggestions import (
     unusable_evidence_recommendation,
     validate_recommendation,
 )
+from meeting_memory.knowledge.review_triage import ReviewTriage
 from meeting_memory.knowledge.util import sha256_bytes, sha256_file
 
 
@@ -217,6 +223,335 @@ class AIReviewSuggestionTest(unittest.TestCase):
         )
 
         self.assertEqual({"existing_id": "project-framework"}, arguments)
+
+    def test_human_can_accept_current_suggestion_with_exact_mapped_result(self):
+        context = self.context()
+        recommendation = validate_recommendation(
+            self.repository, context, self.replace_response()
+        )
+        suggestion = create_suggestion(
+            self.repository,
+            context,
+            recommendation,
+            now_fn=lambda: FIXED_NOW,
+        )
+        self.repository.write_suggestion(suggestion)
+
+        result = ReviewResolver(self.repository).resolve(
+            context.item.id,
+            None,
+            "Rui",
+            "I checked the evidence and accept the proposed result.",
+            suggestion_id=suggestion.id,
+            accept_suggestion=True,
+        )
+
+        self.assertEqual("replace", result.action)
+        resolved = self.repository.load_reviews("resolved")[0]
+        self.assertEqual(suggestion.id, resolved.suggestion_id)
+        self.assertEqual("replace", resolved.suggested_action)
+        self.assertEqual("accepted", resolved.suggestion_disposition)
+        self.assertEqual("hybrid", resolved.resolution_mode)
+        updated = self.repository.load_knowledge_file(
+            context.canonical_objects[0].path
+        )
+        self.assertEqual(
+            recommendation.proposed_knowledge.to_dict(),
+            {
+                "category": updated.category,
+                "title": updated.title,
+                "statement": updated.statement,
+                "status": updated.status,
+                "effective_date": updated.effective_date,
+                "owner": updated.owner,
+                "confidence": updated.confidence,
+            },
+        )
+
+    def test_cli_accepts_current_suggestion(self):
+        context = self.context()
+        recommendation = validate_recommendation(
+            self.repository, context, self.replace_response()
+        )
+        suggestion = create_suggestion(
+            self.repository,
+            context,
+            recommendation,
+            now_fn=lambda: FIXED_NOW,
+        )
+        self.repository.write_suggestion(suggestion)
+        output = StringIO()
+
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "--output-dir",
+                    str(self.repository.root),
+                    "--meetings-dir",
+                    str(self.repository.meetings_dir),
+                    "review",
+                    "resolve",
+                    context.item.id,
+                    "--suggestion-id",
+                    suggestion.id,
+                    "--accept-suggestion",
+                    "--reviewer",
+                    "Rui",
+                    "--note",
+                    "I verified and accept this exact suggestion.",
+                    "--no-index",
+                ]
+            )
+
+        self.assertEqual(0, code)
+        self.assertIn("Resolved review-framework with action replace", output.getvalue())
+        self.assertEqual(
+            "accepted",
+            self.repository.load_reviews("resolved")[0].suggestion_disposition,
+        )
+
+    def test_explicit_action_records_current_suggestion_as_overridden(self):
+        context = self.context()
+        recommendation = validate_recommendation(
+            self.repository, context, self.replace_response()
+        )
+        suggestion = create_suggestion(
+            self.repository,
+            context,
+            recommendation,
+            now_fn=lambda: FIXED_NOW,
+        )
+        self.repository.write_suggestion(suggestion)
+
+        ReviewResolver(self.repository).resolve(
+            context.item.id,
+            "keep-existing",
+            "Rui",
+            "The source wording does not establish completion.",
+            suggestion_id=suggestion.id,
+        )
+
+        resolved = self.repository.load_reviews("rejected")[0]
+        self.assertEqual("overridden", resolved.suggestion_disposition)
+        self.assertEqual("replace", resolved.suggested_action)
+        self.assertEqual("keep-existing", resolved.resolution_action)
+
+    def test_stale_suggestion_cannot_be_accepted_or_overridden(self):
+        context = self.context()
+        recommendation = validate_recommendation(
+            self.repository, context, self.replace_response()
+        )
+        suggestion = create_suggestion(
+            self.repository,
+            context,
+            recommendation,
+            now_fn=lambda: FIXED_NOW,
+        )
+        self.repository.write_suggestion(suggestion)
+        pending = self.repository.load_review_file(context.item.path)
+        pending.explanation = "The conflict now has additional context."
+        pending.path.write_bytes(self.repository.render_review(pending))
+
+        for action, accept in ((None, True), ("keep-existing", False)):
+            with self.subTest(accept=accept):
+                with self.assertRaises(StaleReviewError) as caught:
+                    ReviewResolver(self.repository).resolve(
+                        context.item.id,
+                        action,
+                        "Rui",
+                        "This stale suggestion must not affect canonical state.",
+                        suggestion_id=suggestion.id,
+                        accept_suggestion=accept,
+                    )
+                self.assertIn("suggestion inputs changed", str(caught.exception))
+
+    def test_triage_accept_shows_dry_run_then_applies(self):
+        context = self.context()
+        recommendation = validate_recommendation(
+            self.repository, context, self.replace_response()
+        )
+        suggestion = create_suggestion(
+            self.repository,
+            context,
+            recommendation,
+            now_fn=lambda: FIXED_NOW,
+        )
+        self.repository.write_suggestion(suggestion)
+        answers = iter(
+            (
+                "accept",
+                "I verified the evidence and accept the recommendation.",
+                "yes",
+            )
+        )
+        output = []
+
+        result = ReviewTriage(
+            self.repository,
+            FakeReviewAdvisor(self.repository, self.replace_response()),
+            "anthropic/test-reviewer",
+            reviewer="Rui",
+            input_fn=lambda prompt: next(answers),
+            output_fn=output.append,
+        ).run((context.item,))
+
+        self.assertEqual(1, result.applied)
+        self.assertTrue(
+            any("Deterministic dry-run:" in value for value in output)
+        )
+        resolved = self.repository.load_reviews("resolved")[0]
+        self.assertEqual("accepted", resolved.suggestion_disposition)
+
+    def test_triage_override_defer_and_quit_paths(self):
+        context = self.context()
+        recommendation = validate_recommendation(
+            self.repository, context, self.replace_response()
+        )
+        suggestion = create_suggestion(
+            self.repository,
+            context,
+            recommendation,
+            now_fn=lambda: FIXED_NOW,
+        )
+        self.repository.write_suggestion(suggestion)
+        answers = iter(
+            (
+                "override",
+                "keep-existing",
+                "The wording does not prove completion.",
+                "yes",
+            )
+        )
+        result = ReviewTriage(
+            self.repository,
+            FakeReviewAdvisor(self.repository, self.replace_response()),
+            "anthropic/test-reviewer",
+            reviewer="Rui",
+            input_fn=lambda prompt: next(answers),
+            output_fn=lambda value: None,
+        ).run((context.item,))
+        self.assertEqual(1, result.applied)
+        self.assertEqual(
+            "overridden",
+            self.repository.load_reviews("rejected")[0].suggestion_disposition,
+        )
+
+        # Defer and quit do not mutate their pending case.
+        second = self.make_object("project-framework-second")
+        deferred = self.make_review(
+            second,
+            identifier="review-framework-second",
+            title="Second framework conflict",
+        )
+        for answer, expected_deferred, expected_quit in (
+            ("defer", 1, False),
+            ("quit", 0, True),
+        ):
+            with self.subTest(answer=answer):
+                triage = ReviewTriage(
+                    self.repository,
+                    FakeReviewAdvisor(
+                        self.repository, self.replace_response(second.id)
+                    ),
+                    "anthropic/test-reviewer",
+                    reviewer="Rui",
+                    input_fn=lambda prompt, value=answer: value,
+                    output_fn=lambda value: None,
+                )
+                outcome = triage.run((deferred,))
+                self.assertEqual(expected_deferred, outcome.deferred)
+                self.assertEqual(expected_quit, outcome.quit)
+                self.assertTrue(deferred.path.exists())
+
+    def test_triage_declined_confirmation_writes_no_resolution(self):
+        context = self.context()
+        recommendation = validate_recommendation(
+            self.repository, context, self.replace_response()
+        )
+        suggestion = create_suggestion(
+            self.repository,
+            context,
+            recommendation,
+            now_fn=lambda: FIXED_NOW,
+        )
+        self.repository.write_suggestion(suggestion)
+        before = context.item.path.read_bytes()
+        answers = iter(
+            (
+                "accept",
+                "I reviewed the dry-run but do not want to apply it.",
+                "no",
+            )
+        )
+
+        result = ReviewTriage(
+            self.repository,
+            FakeReviewAdvisor(self.repository, self.replace_response()),
+            "anthropic/test-reviewer",
+            reviewer="Rui",
+            input_fn=lambda prompt: next(answers),
+            output_fn=lambda value: None,
+        ).run((context.item,))
+
+        self.assertEqual(1, result.declined)
+        self.assertEqual(before, context.item.path.read_bytes())
+
+    def test_triage_failure_does_not_undo_earlier_applied_decision(self):
+        first_object = self.make_object("project-framework-first")
+        second_object = self.make_object("project-framework-second")
+        first = self.make_review(
+            first_object,
+            identifier="review-framework-first",
+            title="First framework conflict",
+        )
+        second = self.make_review(
+            second_object,
+            identifier="review-framework-second",
+            title="Second framework conflict",
+        )
+        for item, existing_id in (
+            (first, first_object.id),
+            (second, second_object.id),
+        ):
+            context = build_suggestion_context(
+                self.repository, item, "anthropic/test-reviewer"
+            )
+            recommendation = validate_recommendation(
+                self.repository,
+                context,
+                self.replace_response(existing_id),
+            )
+            self.repository.write_suggestion(
+                create_suggestion(
+                    self.repository,
+                    context,
+                    recommendation,
+                    now_fn=lambda: FIXED_NOW,
+                )
+            )
+        answers = iter(
+            (
+                "accept",
+                "The first decision is supported.",
+                "yes",
+                "accept",
+                "",  # The second resolver rejects an empty human note.
+            )
+        )
+
+        result = ReviewTriage(
+            self.repository,
+            FakeReviewAdvisor(self.repository, self.replace_response()),
+            "anthropic/test-reviewer",
+            reviewer="Rui",
+            input_fn=lambda prompt: next(answers),
+            output_fn=lambda value: None,
+        ).run((first, second))
+
+        self.assertEqual(1, result.applied)
+        self.assertEqual(1, result.failed)
+        self.assertFalse(first.path.exists())
+        self.assertTrue(second.path.exists())
 
     def test_validation_rejects_unknown_fields_ids_citations_and_parameters(self):
         context = self.context()

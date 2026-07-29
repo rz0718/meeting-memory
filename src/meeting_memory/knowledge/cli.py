@@ -74,6 +74,7 @@ from .review_suggestions import (
     render_suggestion,
     suggestion_display_payload,
 )
+from .review_triage import ReviewTriage
 from .search import (
     SearchFilters,
     render_search_results,
@@ -376,6 +377,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_output(review_suggest)
 
+    review_triage = review_commands.add_parser(
+        "triage",
+        help="interactively suggest, preview, and resolve pending reviews",
+    )
+    review_triage.add_argument(
+        "--priority",
+        choices=("conflict", "linked", "unlinked", "all"),
+        default="all",
+    )
+    review_triage.add_argument(
+        "--reason", choices=("conflicting_evidence", "ambiguous_match")
+    )
+    review_triage.add_argument("--category", choices=tuple(sorted(CATEGORIES)))
+    review_triage.add_argument("--existing-id")
+    review_triage.add_argument("--source")
+    review_triage.add_argument("--limit", type=_positive)
+    review_triage.add_argument("--reviewer")
+    review_triage.add_argument("--model")
+    review_triage.add_argument("--context-lines", type=_context_lines, default=5)
+    review_triage.add_argument("--timeout", type=_positive, default=120)
+
     review_refresh = review_commands.add_parser(
         "refresh",
         help="rebase a pending review onto its current canonical snapshot",
@@ -392,7 +414,17 @@ def build_parser() -> argparse.ArgumentParser:
         "resolve", help="apply an explicit human review decision"
     )
     review_resolve.add_argument("review_id")
-    review_resolve.add_argument("--action", required=True, choices=REVIEW_ACTIONS)
+    resolve_decision = review_resolve.add_mutually_exclusive_group(required=True)
+    resolve_decision.add_argument("--action", choices=REVIEW_ACTIONS)
+    resolve_decision.add_argument(
+        "--accept-suggestion",
+        action="store_true",
+        help="apply the exact action and parameters from --suggestion-id",
+    )
+    review_resolve.add_argument(
+        "--suggestion-id",
+        help="current suggestion accepted or explicitly overridden by this decision",
+    )
     review_resolve.add_argument("--reviewer", required=True)
     review_resolve.add_argument("--note", required=True)
     review_resolve.add_argument(
@@ -606,11 +638,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 end_date = today + dt.timedelta(days=1) if args.include_today else today
                 start_date = end_date - dt.timedelta(days=args.lookback_days)
-            result = SlackCollector(
-                meetings_dir,
-                slack.get("channel_ids", []),
-                token=_slack_token(slack),
-            ).sync(start_date, end_date, dry_run=args.dry_run)
+            with repository.mutation_lock():
+                result = SlackCollector(
+                    meetings_dir,
+                    slack.get("channel_ids", []),
+                    token=_slack_token(slack),
+                ).sync(start_date, end_date, dry_run=args.dry_run)
             if args.json:
                 print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
             else:
@@ -815,6 +848,53 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                     print("Manifest: %s" % result.manifest_path)
                 return 1 if result.failed else 0
+            if args.review_command == "triage":
+                values = list_reviews(
+                    repository,
+                    status="pending",
+                    priority=args.priority,
+                    reason=args.reason,
+                    category=args.category,
+                    existing_id=args.existing_id,
+                    source=args.source,
+                    limit=args.limit,
+                )
+                model = _review_model(args.model, openrouter)
+                if not model:
+                    raise ConfigurationError(
+                        "review model is not configured; use --model, "
+                        "MEETING_MEMORY_REVIEW_MODEL, review_model, or ask_model"
+                    )
+                reviewer = (
+                    args.reviewer
+                    or os.environ.get("MEETING_MEMORY_REVIEWER")
+                    or input("Reviewer: ").strip()
+                )
+                result = ReviewTriage(
+                    repository,
+                    OpenRouterReviewAdvisor(
+                        repository,
+                        api_key=_ask_api_key(openrouter),
+                        model=model,
+                        timeout=args.timeout,
+                    ),
+                    model,
+                    reviewer=reviewer,
+                    context_lines=args.context_lines,
+                ).run(values)
+                print(
+                    "Triage summary: %d selected, %d applied, %d deferred, "
+                    "%d declined, %d failed%s."
+                    % (
+                        result.selected,
+                        result.applied,
+                        result.deferred,
+                        result.declined,
+                        result.failed,
+                        ", quit early" if result.quit else "",
+                    )
+                )
+                return 1 if result.failed else 0
             if args.review_command == "refresh":
                 result = ReviewRefresher(repository).refresh(
                     args.review_id,
@@ -849,6 +929,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.action,
                 args.reviewer,
                 args.note,
+                suggestion_id=args.suggestion_id,
+                accept_suggestion=args.accept_suggestion,
                 existing_id=args.existing_id,
                 duplicate_of=args.duplicate_of,
                 new_id=args.new_id,

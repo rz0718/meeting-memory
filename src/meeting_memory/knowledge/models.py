@@ -14,8 +14,10 @@ from .constants import (
     OUTCOMES,
     REVIEW_ACTIONS,
     REVIEW_STATUSES,
+    RESOLUTION_MODES,
     RUN_STATUSES,
     STATUSES,
+    SUGGESTION_DISPOSITIONS,
 )
 from .errors import SchemaError
 
@@ -344,6 +346,13 @@ class ReviewItem:
     affected_object_ids: List[str] = field(default_factory=list)
     duplicate_of: Optional[str] = None
     allowed_stale_evidence: bool = False
+    suggestion_id: Optional[str] = None
+    suggested_action: Optional[str] = None
+    suggestion_disposition: str = "not_used"
+    resolution_mode: str = "human"
+    automation_policy: Optional[str] = None
+    verifier_suggestion_id: Optional[str] = None
+    verifier_model: Optional[str] = None
     path: Optional[Path] = None
 
     @classmethod
@@ -396,6 +405,13 @@ class ReviewItem:
         affected_object_ids: List[str] = []
         duplicate_of = None
         allowed_stale_evidence = False
+        suggestion_id = None
+        suggested_action = None
+        suggestion_disposition = "not_used"
+        resolution_mode = "human"
+        automation_policy = None
+        verifier_suggestion_id = None
+        verifier_model = None
         if resolution is not None:
             if not isinstance(resolution, dict):
                 raise SchemaError("review.resolution must be an object")
@@ -430,6 +446,76 @@ class ReviewItem:
             if not isinstance(allowed_stale_evidence, bool):
                 raise SchemaError(
                     "review.resolution.allowed_stale_evidence must be boolean"
+                )
+            suggestion_id = _nullable_string(
+                resolution.get("suggestion_id"),
+                "review.resolution.suggestion_id",
+            )
+            suggested_action = _nullable_string(
+                resolution.get("suggested_action"),
+                "review.resolution.suggested_action",
+            )
+            if suggested_action is not None and suggested_action not in REVIEW_ACTIONS:
+                raise SchemaError(
+                    "review.resolution.suggested_action is not allowed"
+                )
+            suggestion_disposition = resolution.get(
+                "suggestion_disposition", "not_used"
+            )
+            if suggestion_disposition not in SUGGESTION_DISPOSITIONS:
+                raise SchemaError(
+                    "review.resolution.suggestion_disposition is not allowed"
+                )
+            resolution_mode = resolution.get("resolution_mode", "human")
+            if resolution_mode not in RESOLUTION_MODES:
+                raise SchemaError("review.resolution.resolution_mode is not allowed")
+            automation_policy = _nullable_string(
+                resolution.get("automation_policy"),
+                "review.resolution.automation_policy",
+            )
+            verifier_suggestion_id = _nullable_string(
+                resolution.get("verifier_suggestion_id"),
+                "review.resolution.verifier_suggestion_id",
+            )
+            verifier_model = _nullable_string(
+                resolution.get("verifier_model"),
+                "review.resolution.verifier_model",
+            )
+            if suggestion_id is None:
+                if suggestion_disposition != "not_used" or resolution_mode != "human":
+                    raise SchemaError(
+                        "resolution without a suggestion must be human/not_used"
+                    )
+                if suggested_action is not None:
+                    raise SchemaError(
+                        "resolution without a suggestion cannot have suggested_action"
+                    )
+            else:
+                if suggestion_disposition not in ("accepted", "overridden"):
+                    raise SchemaError(
+                        "resolution with a suggestion must be accepted or overridden"
+                    )
+                if resolution_mode not in ("hybrid", "automated"):
+                    raise SchemaError(
+                        "resolution with a suggestion must be hybrid or automated"
+                    )
+                if (
+                    suggestion_disposition == "accepted"
+                    and suggested_action != resolution_action
+                ):
+                    raise SchemaError(
+                        "accepted suggestion action must equal the final action"
+                    )
+            if resolution_mode != "automated" and any(
+                value is not None
+                for value in (
+                    automation_policy,
+                    verifier_suggestion_id,
+                    verifier_model,
+                )
+            ):
+                raise SchemaError(
+                    "automation audit fields require automated resolution mode"
                 )
         if status == "pending" and resolution is not None:
             raise SchemaError("pending review item may not contain a resolution")
@@ -480,6 +566,13 @@ class ReviewItem:
             affected_object_ids=affected_object_ids,
             duplicate_of=duplicate_of,
             allowed_stale_evidence=allowed_stale_evidence,
+            suggestion_id=suggestion_id,
+            suggested_action=suggested_action,
+            suggestion_disposition=suggestion_disposition,
+            resolution_mode=resolution_mode,
+            automation_policy=automation_policy,
+            verifier_suggestion_id=verifier_suggestion_id,
+            verifier_model=verifier_model,
             path=body.get("path"),
         )
 
@@ -509,6 +602,13 @@ class ReviewItem:
                 "affected_object_ids": list(self.affected_object_ids),
                 "duplicate_of": self.duplicate_of,
                 "allowed_stale_evidence": self.allowed_stale_evidence,
+                "suggestion_id": self.suggestion_id,
+                "suggested_action": self.suggested_action,
+                "suggestion_disposition": self.suggestion_disposition,
+                "resolution_mode": self.resolution_mode,
+                "automation_policy": self.automation_policy,
+                "verifier_suggestion_id": self.verifier_suggestion_id,
+                "verifier_model": self.verifier_model,
             }
         return result
 

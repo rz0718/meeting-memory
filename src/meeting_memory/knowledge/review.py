@@ -21,8 +21,8 @@ from .indexes import generate_indexes
 from .models import Evidence, KnowledgeCandidate, KnowledgeObject, ReviewItem
 from .presentation import read_evidence_excerpt
 from .reconcile import knowledge_id
-from .repository import KnowledgeRepository
-from .util import iso_z, normalize_text, sha256_bytes, utc_now
+from .repository import KnowledgeRepository, mutation_locked
+from .util import iso_z, normalize_text, sha256_bytes, sha256_file, utc_now
 
 
 def review_priority(item: ReviewItem) -> str:
@@ -189,6 +189,13 @@ def review_payload(
                 "affected_object_ids": list(item.affected_object_ids),
                 "duplicate_of": item.duplicate_of,
                 "allowed_stale_evidence": item.allowed_stale_evidence,
+                "suggestion_id": item.suggestion_id,
+                "suggested_action": item.suggested_action,
+                "suggestion_disposition": item.suggestion_disposition,
+                "resolution_mode": item.resolution_mode,
+                "automation_policy": item.automation_policy,
+                "verifier_suggestion_id": item.verifier_suggestion_id,
+                "verifier_model": item.verifier_model,
             }
             if item.resolution_action
             else None
@@ -336,6 +343,15 @@ def render_review_show(
                 "  resolved at: %s" % item.resolved_at,
                 "  allowed stale evidence: %s"
                 % ("yes" if item.allowed_stale_evidence else "no"),
+                "  suggestion ID: %s" % (item.suggestion_id or "None"),
+                "  suggested action: %s"
+                % (
+                    item.suggested_action
+                    or ("human_required" if item.suggestion_id else "None")
+                ),
+                "  suggestion disposition: %s"
+                % item.suggestion_disposition,
+                "  resolution mode: %s" % item.resolution_mode,
                 "  note: %s" % item.resolution_note,
             ]
         )
@@ -398,6 +414,7 @@ class ReviewRefresher:
     def __init__(self, repository: KnowledgeRepository):
         self.repository = repository
 
+    @mutation_locked
     def refresh(
         self,
         review_id: str,
@@ -441,6 +458,11 @@ class ReviewRefresher:
             )
 
         original_bytes = item.path.read_bytes()
+        target_digest = (
+            sha256_file(target.path)
+            if target.path is not None and target.path.is_file()
+            else None
+        )
         previous_statement = item.existing_statement
         previous_updated_at = item.existing_updated_at
         refreshed = copy.deepcopy(item)
@@ -475,7 +497,10 @@ class ReviewRefresher:
             return result
         self.repository.commit(
             {item.path: rendered},
-            preconditions={item.path: sha256_bytes(original_bytes)},
+            preconditions={
+                item.path: sha256_bytes(original_bytes),
+                **({target.path: target_digest} if target.path is not None else {}),
+            },
         )
         self.repository.validate_all()
         return result
@@ -724,13 +749,16 @@ class ReviewResolver:
                     "--effective-date must use YYYY-MM-DD"
                 ) from exc
 
+    @mutation_locked
     def resolve(
         self,
         review_id: str,
-        action: str,
+        action: Optional[str],
         reviewer: str,
         note: str,
         *,
+        suggestion_id: Optional[str] = None,
+        accept_suggestion: bool = False,
         existing_id: Optional[str] = None,
         duplicate_of: Optional[str] = None,
         new_id: Optional[str] = None,
@@ -745,7 +773,17 @@ class ReviewResolver:
         dry_run: bool = False,
         refresh_indexes: bool = True,
     ) -> ReviewResolutionResult:
-        if action not in REVIEW_ACTIONS:
+        if accept_suggestion and not suggestion_id:
+            raise ReviewResolutionError(
+                "--accept-suggestion requires --suggestion-id"
+            )
+        if accept_suggestion and action is not None:
+            raise ReviewResolutionError(
+                "--accept-suggestion and an explicit action are mutually exclusive"
+            )
+        if not accept_suggestion and action is None:
+            raise ReviewResolutionError("review resolution requires an action")
+        if action is not None and action not in REVIEW_ACTIONS:
             raise ReviewResolutionError("unsupported review action: %s" % action)
         reviewer = reviewer.strip()
         note = note.strip()
@@ -809,6 +847,119 @@ class ReviewResolver:
             raise ReviewResolutionError("review item has no repository path")
 
         objects = self.repository.load_knowledge()
+        review_digests = {
+            value.id: sha256_file(value.path)
+            for value in all_reviews
+            if value.path is not None and value.path.is_file()
+        }
+        object_digests = {
+            value.id: sha256_file(value.path)
+            for value in objects
+            if value.path is not None and value.path.is_file()
+        }
+        evidence_paths: Dict[str, Path] = {}
+        evidence_digests: Dict[str, Optional[str]] = {}
+        for evidence in item.existing_evidence + item.candidate_evidence:
+            if evidence.source in evidence_paths:
+                continue
+            path = self.repository.evidence_path(evidence.source)
+            evidence_paths[evidence.source] = path
+            evidence_digests[evidence.source] = (
+                sha256_file(path) if path.is_file() else None
+            )
+
+        suggestion = None
+        suggestion_context = None
+        suggestion_digest = None
+        suggestion_evidence_preconditions: Dict[Path, Optional[str]] = {}
+        if suggestion_id is not None:
+            from .review_suggestions import (
+                build_suggestion_context,
+                resolver_arguments_for_proposed_result,
+            )
+
+            suggestion = self.repository.load_suggestion(review_id, suggestion_id)
+            suggestion_path = self.repository.suggestion_path(
+                review_id, suggestion_id
+            )
+            suggestion_digest = sha256_file(suggestion_path)
+            suggestion_context = build_suggestion_context(
+                self.repository,
+                item,
+                suggestion.model,
+                context_lines=int(
+                    suggestion.request_parameters["context_lines"]
+                ),
+                review_values=all_reviews,
+                objects=objects,
+            )
+            if (
+                suggestion_context.input_fingerprint
+                != suggestion.input_fingerprint
+                or suggestion_context.review_sha256 != suggestion.review_sha256
+                or suggestion_context.canonical_sha256_by_id
+                != suggestion.canonical_sha256_by_id
+                or suggestion_context.related_review_sha256_by_id
+                != suggestion.related_review_sha256_by_id
+                or suggestion_context.evidence_sha256_by_source
+                != suggestion.evidence_sha256_by_source
+                or suggestion_context.prompt_sha256 != suggestion.prompt_sha256
+            ):
+                raise StaleReviewError(
+                    "suggestion inputs changed; generate or select a current suggestion"
+                )
+            for source, digest in (
+                suggestion_context.evidence_sha256_by_source.items()
+            ):
+                path = self.repository.evidence_path(source)
+                if digest == "missing":
+                    suggestion_evidence_preconditions[path] = None
+                elif len(digest) == 64 and all(
+                    value in "0123456789abcdef" for value in digest
+                ):
+                    suggestion_evidence_preconditions[path] = digest
+            if accept_suggestion:
+                supplied_overrides = any(
+                    value is not None
+                    for value in (
+                        existing_id,
+                        duplicate_of,
+                        new_id,
+                        title,
+                        status,
+                        owner,
+                        confidence,
+                        effective_date,
+                    )
+                ) or clear_owner or clear_effective_date or allow_stale_evidence
+                if supplied_overrides:
+                    raise ReviewResolutionError(
+                        "accepted suggestions cannot be combined with resolution overrides"
+                    )
+                recommendation = suggestion.recommendation
+                if recommendation.suggested_action is None:
+                    raise ReviewResolutionError(
+                        "this suggestion requires a human-authored action"
+                    )
+                action = recommendation.suggested_action
+                mapped = resolver_arguments_for_proposed_result(
+                    suggestion_context, recommendation
+                )
+                existing_id = mapped.get("existing_id")
+                duplicate_of = mapped.get("duplicate_of")
+                new_id = mapped.get("new_id")
+                title = mapped.get("title")
+                status = mapped.get("status")
+                owner = mapped.get("owner")
+                clear_owner = bool(mapped.get("clear_owner", False))
+                confidence = mapped.get("confidence")
+                effective_date = mapped.get("effective_date")
+                clear_effective_date = bool(
+                    mapped.get("clear_effective_date", False)
+                )
+
+        if action is None:  # Narrow Optional[str] after suggestion mapping.
+            raise ReviewResolutionError("review resolution requires an action")
         target_required = action in ("replace", "refine", "reconfirm")
         target = self._target_object(item, objects, existing_id, target_required)
         if action in ("replace", "refine", "reconfirm", "keep-existing"):
@@ -997,6 +1148,18 @@ class ReviewResolver:
         resolved.affected_object_ids = sorted(set(affected))
         resolved.duplicate_of = duplicate_of if action == "merge-duplicate" else None
         resolved.allowed_stale_evidence = allow_stale_evidence
+        resolved.suggestion_id = suggestion.id if suggestion is not None else None
+        resolved.suggested_action = (
+            suggestion.recommendation.suggested_action
+            if suggestion is not None
+            else None
+        )
+        resolved.suggestion_disposition = (
+            "accepted" if accept_suggestion else "overridden"
+        ) if suggestion is not None else "not_used"
+        resolved.resolution_mode = (
+            "hybrid" if suggestion is not None else "human"
+        )
         resolved.path = (
             self.repository.review_dir
             / destination_status
@@ -1025,7 +1188,46 @@ class ReviewResolver:
             )
 
         self.repository.ensure_layout()
-        self.repository.commit(changes, deletes=(item.path,))
+        preconditions: Dict[Path, Optional[str]] = {
+            item.path: review_digests[item.id],
+            resolved.path: None,
+        }
+        for path in canonical_writes:
+            matching = next(
+                (
+                    value
+                    for value in objects
+                    if value.path is not None and value.path.resolve() == path.resolve()
+                ),
+                None,
+            )
+            preconditions[path] = (
+                object_digests[matching.id] if matching is not None else None
+            )
+        if action in ("replace", "refine", "reconfirm", "create-separate"):
+            for source, path in evidence_paths.items():
+                preconditions[path] = evidence_digests[source]
+        if action == "merge-duplicate" and duplicate_of is not None:
+            duplicate = exact_review(self.repository, duplicate_of, all_reviews)
+            if duplicate.path is not None:
+                preconditions[duplicate.path] = review_digests[duplicate.id]
+        if suggestion is not None and suggestion_digest is not None:
+            preconditions[
+                self.repository.suggestion_path(item.id, suggestion.id)
+            ] = suggestion_digest
+            if suggestion_context is not None:
+                for value in suggestion_context.canonical_objects:
+                    if value.path is not None:
+                        preconditions[value.path] = object_digests[value.id]
+                for value in suggestion_context.related_reviews:
+                    if value.path is not None:
+                        preconditions[value.path] = review_digests[value.id]
+                preconditions.update(suggestion_evidence_preconditions)
+        self.repository.commit(
+            changes,
+            deletes=(item.path,),
+            preconditions=preconditions,
+        )
         index_paths: Tuple[str, ...] = ()
         if refresh_indexes and canonical_writes:
             index_result = generate_indexes(self.repository)

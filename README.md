@@ -226,9 +226,9 @@ Suggestions are advisory and append-only. The command writes only
 under `.knowledge-state/review-runs/`; it never changes a canonical object or
 review status. A matching exact request is reused unless `--force` is given.
 Use `--suggestion-id SUGGESTION_ID` to inspect a historical suggestion even
-after it becomes stale. Phase 1 does not accept suggestions or resolve reviews
-automatically; the existing explicit human resolution flow remains the
-mutation boundary.
+after it becomes stale. Suggestion generation itself never resolves a review;
+Phase 2 lets a human accept or override a current artifact through the same
+deterministic resolution boundary.
 
 ```bash
 meeting-memory review show REVIEW_ID --with-evidence
@@ -308,13 +308,39 @@ the complete command with `--dry-run`:
 ```bash
 meeting-memory review resolve REVIEW_ID \
   --action refine \
-  --reviewer "Rui" \
+  --reviewer "Reviewer Name" \
   --note "The owner confirmed this is an approved refinement." \
   --dry-run \
   --json
 ```
 
-The dry-run writes nothing. Check its destination status, affected object IDs,
+To accept the AI action and its validated parameters exactly, replace
+`--action` and action-specific arguments with:
+
+```bash
+meeting-memory review resolve REVIEW_ID \
+  --suggestion-id SUGGESTION_ID \
+  --accept-suggestion \
+  --reviewer "Reviewer Name" \
+  --note "Checked the cited evidence and approve the proposed result." \
+  --dry-run
+```
+
+To modify the recommendation, keep `--suggestion-id` but provide your explicit
+`--action` and options. The durable audit will preserve the suggested action,
+the final action, and mark the suggestion as `overridden`.
+
+For a guided filtered batch, use:
+
+```bash
+meeting-memory review triage --priority conflict --reviewer "Reviewer Name"
+```
+
+Triage shows the evidence and current suggestion, offers accept, override,
+defer, or quit, displays the deterministic dry-run, and asks before applying.
+One failed case does not undo completed earlier decisions.
+
+The dry-run writes no review or canonical changes. Check its destination status, affected object IDs,
 before/after object summaries, and changed paths. In particular, verify that
 the affected object is the one selected during the evidence review.
 
@@ -341,7 +367,7 @@ Repeat the identical command without `--dry-run`:
 ```bash
 meeting-memory review resolve REVIEW_ID \
   --action refine \
-  --reviewer "Rui" \
+  --reviewer "Reviewer Name" \
   --note "The owner confirmed this is an approved refinement."
 ```
 
@@ -374,37 +400,48 @@ The review Markdown under `knowledge-review/resolved/` or
 `knowledge-review/rejected/` is the durable audit record. It contains the
 original comparison and evidence plus the resolution action, reviewer,
 timestamp, note, affected object IDs, duplicate link when applicable, and any
-stale-evidence override.
+stale-evidence override. When a suggestion informed the decision, it also
+records the suggestion ID, suggested action, final disposition (`accepted` or
+`overridden`), and `hybrid` resolution mode. Direct decisions remain
+`human`/`not_used`.
 
-### Complete example: keep the cohort-reporting knowledge
+All Meeting Memory writers share a repository-scoped mutation lock. Apply
+reloads and verifies suggestion, review, canonical, duplicate-review, and
+evidence inputs while holding that lock; commit checks expected byte digests or
+expected absence before its first write. A later apply repeats every check
+performed by a dry-run. The lock coordinates Meeting Memory processes, while
+commit-time preconditions protect against direct external edits that do not
+honor the advisory lock.
 
-The following traces a decision to retain the existing cohort-reporting
-statement and drop the broader candidate:
+### Complete example: retain existing knowledge
+
+The following traces a decision to retain an existing statement and reject an
+unsupported candidate:
 
 ```bash
 # 1. Inspect the exact statements, diff, and source excerpts.
 meeting-memory review show \
-  review-cohort-based-reporting-replace-event-based-views-2026-07-20-d07136e1 \
+  REVIEW_ID \
   --with-evidence
 
 # 2. Preview the audited drop.
 meeting-memory review resolve \
-  review-cohort-based-reporting-replace-event-based-views-2026-07-20-d07136e1 \
+  REVIEW_ID \
   --action keep-existing \
-  --reviewer "Rui" \
-  --note "Keep the curated statement. The candidate restates the same transition but adds IV and Data Studio scope without establishing a replacement of the curated object." \
+  --reviewer "Reviewer Name" \
+  --note "Keep the curated statement. The evidence does not establish that the candidate replaces the existing state." \
   --dry-run
 
 # 3. Apply the same decision.
 meeting-memory review resolve \
-  review-cohort-based-reporting-replace-event-based-views-2026-07-20-d07136e1 \
+  REVIEW_ID \
   --action keep-existing \
-  --reviewer "Rui" \
-  --note "Keep the curated statement. The candidate restates the same transition but adds IV and Data Studio scope without establishing a replacement of the curated object."
+  --reviewer "Reviewer Name" \
+  --note "Keep the curated statement. The evidence does not establish that the candidate replaces the existing state."
 
 # 4. Read back the rejected review record and validate the repository.
 meeting-memory review show \
-  review-cohort-based-reporting-replace-event-based-views-2026-07-20-d07136e1 \
+  REVIEW_ID \
   --with-evidence
 meeting-memory validate
 ```

@@ -10,7 +10,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from .constants import CATEGORIES
 from .consumption import SearchDocument, latest_document_date, load_documents
 from .machine_index import machine_index_payloads
-from .repository import KnowledgeRepository
+from .repository import KnowledgeRepository, mutation_locked
+from .util import sha256_bytes
 
 
 STATUS_ORDER = ("approved", "proposed", "unclear", "deprecated")
@@ -290,6 +291,7 @@ def render_human_indexes(
     return result
 
 
+@mutation_locked
 def generate_indexes(
     repository: KnowledgeRepository,
     recent_days: int = 30,
@@ -306,15 +308,25 @@ def generate_indexes(
     payloads.update(machine)
     changed = []
     unchanged = []
+    preconditions = {}
     for path in sorted(payloads, key=str):
-        if not path.exists() or path.read_bytes() != payloads[path]:
+        existing = path.read_bytes() if path.is_file() else None
+        preconditions[path] = (
+            sha256_bytes(existing)
+            if existing is not None
+            else None
+        )
+        if existing is None or existing != payloads[path]:
             changed.append(path)
         else:
             unchanged.append(path)
     to_write = payloads if force else {path: payloads[path] for path in changed}
     written = []
     if not dry_run and to_write:
-        written = repository.commit(to_write)
+        written = repository.commit(
+            to_write,
+            preconditions={path: preconditions[path] for path in to_write},
+        )
     return IndexResult(
         loaded=len(documents),
         generated=len(human),

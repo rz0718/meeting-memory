@@ -34,6 +34,8 @@ REVIEW_ACTIONS = (
     "keep-existing",
     "merge-duplicate",
 )
+SUGGESTION_DISPOSITIONS = ("accepted", "overridden", "not_used")
+RESOLUTION_MODES = ("human", "hybrid", "automated")
 
 CATEGORY_PREFIX = {
     "decisions": "decision",
