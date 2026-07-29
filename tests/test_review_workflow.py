@@ -20,7 +20,11 @@ from meeting_memory.knowledge.models import (
     ReviewItem,
 )
 from meeting_memory.knowledge.repository import KnowledgeRepository
-from meeting_memory.knowledge.review import ReviewResolver, list_reviews
+from meeting_memory.knowledge.review import (
+    ReviewRefresher,
+    ReviewResolver,
+    list_reviews,
+)
 from meeting_memory.knowledge.pipeline import KnowledgePipeline
 from meeting_memory.knowledge.util import sha256_bytes, sha256_file
 
@@ -322,6 +326,70 @@ class ReviewWorkflowTest(unittest.TestCase):
                 "Attempting an outdated decision.",
             )
 
+    def test_refresh_rebases_snapshot_then_keep_existing_can_resolve(self):
+        existing = self.make_object()
+        _, pending_path = self.make_review(existing=existing)
+        candidate_statement = "The framework is complete."
+        existing.statement = "The framework remains in planning."
+        existing.updated_at = "2026-07-29T07:30:00Z"
+        existing.path.write_bytes(self.repository.render_knowledge(existing))
+        before_refresh = pending_path.read_bytes()
+
+        dry_run = ReviewRefresher(self.repository).refresh(
+            "review-framework", dry_run=True
+        )
+
+        self.assertTrue(dry_run.dry_run)
+        self.assertEqual(before_refresh, pending_path.read_bytes())
+        self.assertEqual(
+            "The framework remains in planning.", dry_run.current_statement
+        )
+
+        applied = ReviewRefresher(self.repository).refresh("review-framework")
+
+        self.assertFalse(applied.dry_run)
+        refreshed = self.repository.load_review_file(pending_path)
+        self.assertEqual(existing.statement, refreshed.existing_statement)
+        self.assertEqual(existing.updated_at, refreshed.existing_updated_at)
+        self.assertEqual(
+            sha256_bytes(existing.statement.encode("utf-8")),
+            refreshed.existing_statement_sha256,
+        )
+        self.assertEqual(candidate_statement, refreshed.candidate_statement)
+
+        result = self.resolver().resolve(
+            "review-framework",
+            "keep-existing",
+            "Rui",
+            "The candidate does not supersede the refreshed canonical state.",
+        )
+        self.assertEqual("rejected", result.destination_status)
+        current = self.repository.load_knowledge_file(existing.path)
+        self.assertEqual(existing.statement, current.statement)
+
+    def test_refresh_refuses_to_change_review_identity(self):
+        existing = self.make_object()
+        self.make_review(existing=existing)
+
+        with self.assertRaises(ReviewResolutionError):
+            ReviewRefresher(self.repository).refresh(
+                "review-framework", existing_id="another-object"
+            )
+
+    def test_commit_precondition_fails_before_overwriting_changed_file(self):
+        path = self.repository.root / "precondition.txt"
+        path.write_text("loaded", encoding="utf-8")
+        expected = sha256_file(path)
+        path.write_text("changed concurrently", encoding="utf-8")
+
+        with self.assertRaises(StaleReviewError):
+            self.repository.commit(
+                {path: b"replacement"},
+                preconditions={path: expected},
+            )
+
+        self.assertEqual("changed concurrently", path.read_text(encoding="utf-8"))
+
     def test_stale_candidate_evidence_requires_explicit_override(self):
         existing = self.make_object()
         self.make_review(existing=existing)
@@ -476,6 +544,34 @@ class ReviewWorkflowTest(unittest.TestCase):
 
         self.assertEqual((0, 0, 0), (list_code, show_code, resolve_code))
         self.assertIn("review-framework", output.getvalue())
+        self.assertIn("Dry run review-framework", output.getvalue())
+
+    def test_cli_refresh_dry_run(self):
+        existing = self.make_object()
+        self.make_review(existing=existing)
+        existing.statement = "The framework remains in planning."
+        existing.updated_at = "2026-07-29T07:30:00Z"
+        existing.path.write_bytes(self.repository.render_knowledge(existing))
+        common = [
+            "--output-dir",
+            str(self.repository.root),
+            "--meetings-dir",
+            str(self.repository.meetings_dir),
+            "review",
+        ]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            code = main(
+                common
+                + [
+                    "refresh",
+                    "review-framework",
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(0, code)
         self.assertIn("Dry run review-framework", output.getvalue())
 
 

@@ -413,9 +413,27 @@ meeting-memory validate
 
 Resolution is refused when the matched canonical object changed after the
 review was created. There is no override for canonical drift because applying
-an old decision could overwrite newer curated knowledge. Leave that case
-pending and regenerate or refresh it against the current canonical state before
-deciding it.
+an old decision could overwrite newer curated knowledge. Inspect the current
+object, then preview a snapshot refresh:
+
+```bash
+meeting-memory review refresh REVIEW_ID --dry-run
+```
+
+If the selected object and refreshed statement are correct, apply it and
+generate a new suggestion:
+
+```bash
+meeting-memory review refresh REVIEW_ID
+meeting-memory review suggest REVIEW_ID
+meeting-memory review show REVIEW_ID --with-evidence --with-suggestion
+```
+
+Refresh changes only the pending review's existing-side statement, evidence,
+timestamp, and fingerprint. It preserves the candidate and append-only
+suggestion artifacts; prior suggestions become stale. When a review has
+multiple possible canonical objects, select the intended snapshot with
+`--existing-id`.
 
 Resolution is also refused when candidate evidence no longer matches the source
 fingerprint. First run `review show REVIEW_ID --with-evidence` again and inspect

@@ -58,6 +58,7 @@ from .presentation import (
 )
 from .repository import KnowledgeRepository
 from .review import (
+    ReviewRefresher,
     ReviewResolver,
     exact_review,
     list_reviews,
@@ -374,6 +375,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="write a new append-only artifact even when exact inputs match",
     )
     _add_output(review_suggest)
+
+    review_refresh = review_commands.add_parser(
+        "refresh",
+        help="rebase a pending review onto its current canonical snapshot",
+    )
+    review_refresh.add_argument("review_id")
+    review_refresh.add_argument(
+        "--existing-id",
+        help="canonical snapshot to refresh when the review has multiple possibilities",
+    )
+    review_refresh.add_argument("--dry-run", action="store_true")
+    _add_output(review_refresh)
 
     review_resolve = review_commands.add_parser(
         "resolve", help="apply an explicit human review decision"
@@ -802,6 +815,35 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                     print("Manifest: %s" % result.manifest_path)
                 return 1 if result.failed else 0
+            if args.review_command == "refresh":
+                result = ReviewRefresher(repository).refresh(
+                    args.review_id,
+                    existing_id=args.existing_id,
+                    dry_run=args.dry_run,
+                )
+                if args.json:
+                    print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+                else:
+                    mode = "Dry run" if result.dry_run else "Refreshed"
+                    print(
+                        "%s %s against %s."
+                        % (mode, result.review_id, result.existing_id)
+                    )
+                    print(
+                        "Canonical statement: %s -> %s"
+                        % (
+                            result.previous_statement or "none",
+                            result.current_statement,
+                        )
+                    )
+                    if result.suggestions_made_stale:
+                        print(
+                            "Suggestions made stale: %s"
+                            % ", ".join(result.suggestions_made_stale)
+                        )
+                    if not result.changed_paths:
+                        print("Snapshot was already current; no files changed.")
+                return 0
             result = ReviewResolver(repository).resolve(
                 args.review_id,
                 args.action,

@@ -282,6 +282,20 @@ the reviewer, timestamp, action, rationale, and affected object IDs; then the
 browse and machine indexes are regenerated. The command refuses stale
 canonical snapshots and stale evidence by default.
 
+When canonical drift blocks a decision, inspect the current canonical object
+and rebase only the pending review's existing-side snapshot:
+
+```bash
+meeting-memory review refresh REVIEW_ID --dry-run
+meeting-memory review refresh REVIEW_ID
+meeting-memory review suggest REVIEW_ID
+```
+
+This preserves the candidate and suggestion artifacts, while making prior
+suggestions stale. Use `--existing-id` if the review names multiple possible
+canonical objects. Refresh uses a commit-time digest precondition and refuses
+to overwrite a review file changed by another process after it was loaded.
+
 ## Adapting notes from another source
 
 If your notes come from something other than the Google sync, write a small
