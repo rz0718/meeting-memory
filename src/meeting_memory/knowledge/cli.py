@@ -66,6 +66,13 @@ from .review import (
     review_payload,
     reviews_payload,
 )
+from .review_ai import OpenRouterReviewAdvisor, generate_review_suggestions
+from .review_suggestions import (
+    MAX_CONTEXT_LINES,
+    latest_current_suggestion,
+    render_suggestion,
+    suggestion_display_payload,
+)
 from .search import (
     SearchFilters,
     render_search_results,
@@ -136,6 +143,15 @@ def _nonnegative(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from exc
     if parsed < 0:
         raise argparse.ArgumentTypeError("may not be negative")
+    return parsed
+
+
+def _context_lines(value: str) -> int:
+    parsed = _nonnegative(value)
+    if parsed > MAX_CONTEXT_LINES:
+        raise argparse.ArgumentTypeError(
+            "may not exceed %d" % MAX_CONTEXT_LINES
+        )
     return parsed
 
 
@@ -317,6 +333,47 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include safely bounded evidence excerpts",
     )
+    suggestion_selection = review_show.add_mutually_exclusive_group()
+    suggestion_selection.add_argument(
+        "--with-suggestion",
+        action="store_true",
+        help="include the latest suggestion that is current for this review",
+    )
+    suggestion_selection.add_argument(
+        "--suggestion-id",
+        help="include one exact suggestion, even when it is stale",
+    )
+
+    review_suggest = review_commands.add_parser(
+        "suggest", help="generate advisory AI suggestions without resolving reviews"
+    )
+    review_suggest.add_argument("review_id", nargs="?")
+    review_suggest.add_argument(
+        "--all",
+        action="store_true",
+        help="suggest every pending review matched by the filters",
+    )
+    review_suggest.add_argument(
+        "--priority",
+        choices=("conflict", "linked", "unlinked", "all"),
+        default="all",
+    )
+    review_suggest.add_argument(
+        "--reason", choices=("conflicting_evidence", "ambiguous_match")
+    )
+    review_suggest.add_argument("--category", choices=tuple(sorted(CATEGORIES)))
+    review_suggest.add_argument("--existing-id")
+    review_suggest.add_argument("--source")
+    review_suggest.add_argument("--limit", type=_positive)
+    review_suggest.add_argument("--model")
+    review_suggest.add_argument("--context-lines", type=_context_lines, default=5)
+    review_suggest.add_argument("--timeout", type=_positive, default=120)
+    review_suggest.add_argument(
+        "--force",
+        action="store_true",
+        help="write a new append-only artifact even when exact inputs match",
+    )
+    _add_output(review_suggest)
 
     review_resolve = review_commands.add_parser(
         "resolve", help="apply an explicit human review decision"
@@ -412,6 +469,17 @@ def _ask_model(explicit: Optional[str], configured: Dict[str, str]) -> Optional[
         or os.environ.get("ANTHROPIC_MODEL")
         or configured.get("ask_model")
         or configured.get("model")
+    )
+
+
+def _review_model(
+    explicit: Optional[str], configured: Dict[str, str]
+) -> Optional[str]:
+    return (
+        explicit
+        or os.environ.get("MEETING_MEMORY_REVIEW_MODEL")
+        or configured.get("review_model")
+        or configured.get("ask_model")
     )
 
 
@@ -591,36 +659,149 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.review_command == "show":
                 review_values = repository.load_reviews()
                 item = exact_review(repository, args.review_id, review_values)
+                suggestion = None
+                if args.suggestion_id:
+                    suggestion = repository.load_suggestion(
+                        item.id, args.suggestion_id
+                    )
+                elif args.with_suggestion:
+                    suggestion = latest_current_suggestion(repository, item)
+                suggestion_payload = (
+                    suggestion_display_payload(repository, suggestion, item)
+                    if suggestion is not None
+                    else None
+                )
                 if args.raw:
                     if item.path is None:
                         raise ReviewNotFoundError(
                             "review item has no repository path: %s" % item.id
                         )
                     print(item.path.read_text(encoding="utf-8"), end="")
+                    if suggestion_payload is not None:
+                        print("\n" + render_suggestion(suggestion_payload))
                 elif args.json:
+                    payload = review_payload(
+                        repository,
+                        item,
+                        include_excerpts=args.with_evidence,
+                        review_values=review_values,
+                    )
+                    if args.with_suggestion or args.suggestion_id:
+                        payload["suggestion"] = suggestion_payload
                     print(
                         json.dumps(
-                            review_payload(
-                                repository,
-                                item,
-                                include_excerpts=args.with_evidence,
-                                review_values=review_values,
-                            ),
+                            payload,
                             indent=2,
                             ensure_ascii=False,
                         )
                     )
                 else:
-                    print(
-                        render_review_show(
-                            repository,
-                            item,
-                            include_excerpts=args.with_evidence,
-                            review_values=review_values,
-                        ),
-                        end="",
+                    rendered = render_review_show(
+                        repository,
+                        item,
+                        include_excerpts=args.with_evidence,
+                        review_values=review_values,
                     )
+                    if suggestion_payload is not None:
+                        rendered += (
+                            "\n" + render_suggestion(suggestion_payload) + "\n"
+                        )
+                    elif args.with_suggestion:
+                        rendered += (
+                            "\nAI suggestion: No current suggestion is available.\n"
+                        )
+                    print(rendered, end="")
                 return 0
+            if args.review_command == "suggest":
+                if bool(args.review_id) == bool(args.all):
+                    raise ValueError(
+                        "review suggest requires exactly one REVIEW_ID or --all"
+                    )
+                filters = {
+                    key: value
+                    for key, value in {
+                        "priority": args.priority,
+                        "reason": args.reason,
+                        "category": args.category,
+                        "existing_id": args.existing_id,
+                        "source": args.source,
+                        "limit": args.limit,
+                    }.items()
+                    if value is not None and value != "all"
+                }
+                if args.review_id:
+                    all_reviews = repository.load_reviews()
+                    item = exact_review(repository, args.review_id, all_reviews)
+                    if item.status != "pending":
+                        raise ValueError(
+                            "suggestions can only be generated for pending reviews"
+                        )
+                    values = (item,)
+                    filters = {"review_id": args.review_id}
+                else:
+                    values = list_reviews(
+                        repository,
+                        status="pending",
+                        priority=args.priority,
+                        reason=args.reason,
+                        category=args.category,
+                        existing_id=args.existing_id,
+                        source=args.source,
+                        limit=args.limit,
+                    )
+                model = _review_model(args.model, openrouter)
+                if not model:
+                    raise ConfigurationError(
+                        "review model is not configured; use --model, "
+                        "MEETING_MEMORY_REVIEW_MODEL, review_model, or ask_model"
+                    )
+                result = generate_review_suggestions(
+                    repository,
+                    values,
+                    OpenRouterReviewAdvisor(
+                        repository,
+                        api_key=_ask_api_key(openrouter),
+                        model=model,
+                        timeout=args.timeout,
+                    ),
+                    model,
+                    context_lines=args.context_lines,
+                    force=args.force,
+                    filters=filters,
+                )
+                if args.json:
+                    print(
+                        json.dumps(
+                            result.manifest, indent=2, ensure_ascii=False
+                        )
+                    )
+                else:
+                    print(
+                        "Suggestion run %s: %s; %d created, %d reused, %d failed."
+                        % (
+                            result.manifest["run_id"],
+                            result.manifest["status"],
+                            len(result.manifest["suggestions_created"]),
+                            len(result.manifest["suggestions_reused"]),
+                            len(result.manifest["failures"]),
+                        )
+                    )
+                    for review_id, suggestion_id in result.manifest[
+                        "suggestions_created"
+                    ].items():
+                        print("  created: %s -> %s" % (review_id, suggestion_id))
+                    for review_id, suggestion_id in result.manifest[
+                        "suggestions_reused"
+                    ].items():
+                        print("  reused: %s -> %s" % (review_id, suggestion_id))
+                    for failure in result.manifest["failures"]:
+                        print(
+                            "ERROR: %s: %s"
+                            % (failure["review_id"], failure["error"]),
+                            file=sys.stderr,
+                        )
+                    print("Manifest: %s" % result.manifest_path)
+                return 1 if result.failed else 0
             result = ReviewResolver(repository).resolve(
                 args.review_id,
                 args.action,

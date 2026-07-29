@@ -31,6 +31,10 @@ api_key = sk-or-v1-your-key
 model = provider/model-name
 # Optional; falls back to model when blank.
 ask_model =
+# Optional; falls back to ask_model, but never to extraction model.
+review_model =
+# Reserved for a later independent automation verifier.
+review_critic_model =
 
 [slack]
 bot_token = xoxb-your-bot-token
@@ -69,6 +73,13 @@ The OpenRouter settings provide:
 - `api_key`: credential used by extraction and `ask`;
 - `model`: default OpenRouter model for knowledge extraction;
 - `ask_model`: optional model used only by `ask`.
+- `review_model`: model used by advisory `review suggest`; it falls back only
+  to `ask_model`;
+- `review_critic_model`: reserved for the later independent automation critic.
+
+`MEETING_MEMORY_REVIEW_MODEL` overrides `review_model`. Review suggestions do
+not fall back to the extraction `model`, so a missing review model fails
+explicitly.
 
 The optional Slack settings provide:
 
@@ -113,8 +124,8 @@ owns all generated state:
 ```text
 /path/to/meeting-memory-data/
   knowledge/                 canonical memory objects and indexes
-  knowledge-review/          conflicts requiring review
-  .knowledge-state/          source and run state
+  knowledge-review/          conflicts plus append-only AI suggestions
+  .knowledge-state/          source, ingestion-run, and review-run state
   .knowledge-index/          optional machine-readable index
   outputs/                   digests, contexts, and saved answers
   logs/
@@ -194,6 +205,30 @@ Copy the complete `review-...` value shown by `review list`; that is the review
 ID used by every later command.
 
 ### 2. Inspect one conflict and its evidence
+
+Optionally generate an evidence-grounded first review before inspecting it:
+
+```bash
+# One pending review.
+meeting-memory review suggest REVIEW_ID --context-lines 5
+
+# Every pending conflict. Failures are isolated per review and recorded in the
+# dedicated review-run manifest.
+meeting-memory review suggest --priority conflict --all
+
+# Show the latest suggestion whose exact model request still matches current
+# repository and evidence state.
+meeting-memory review show REVIEW_ID --with-evidence --with-suggestion
+```
+
+Suggestions are advisory and append-only. The command writes only
+`knowledge-review/suggestions/REVIEW_ID/SUGGESTION_ID.json` and a manifest
+under `.knowledge-state/review-runs/`; it never changes a canonical object or
+review status. A matching exact request is reused unless `--force` is given.
+Use `--suggestion-id SUGGESTION_ID` to inspect a historical suggestion even
+after it becomes stale. Phase 1 does not accept suggestions or resolve reviews
+automatically; the existing explicit human resolution flow remains the
+mutation boundary.
 
 ```bash
 meeting-memory review show REVIEW_ID --with-evidence

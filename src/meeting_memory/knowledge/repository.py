@@ -24,6 +24,7 @@ from .models import (
     KnowledgeObject,
     MeetingSource,
     ReviewItem,
+    validate_review_run_manifest,
     validate_run_manifest,
     validate_source_state,
 )
@@ -60,7 +61,9 @@ class KnowledgeRepository:
         self.knowledge_dir = self.root / "knowledge"
         self.require_evidence_sources = require_evidence_sources
         self.review_dir = self.root / "knowledge-review"
+        self.suggestion_dir = self.review_dir / "suggestions"
         self.state_dir = self.root / ".knowledge-state"
+        self.review_run_dir = self.state_dir / "review-runs"
         self.outputs_dir = self.root / "outputs" / "Durable-Knowledge"
         self.logs_dir = self.root / "logs"
 
@@ -69,7 +72,8 @@ class KnowledgeRepository:
             (self.knowledge_dir / category).mkdir(parents=True, exist_ok=True)
         for status in REVIEW_STATUSES:
             (self.review_dir / status).mkdir(parents=True, exist_ok=True)
-        for child in ("sources", "runs"):
+        self.suggestion_dir.mkdir(parents=True, exist_ok=True)
+        for child in ("sources", "runs", "review-runs"):
             (self.state_dir / child).mkdir(parents=True, exist_ok=True)
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -438,6 +442,92 @@ class KnowledgeRepository:
     def load_review_ids(self) -> set:
         return {item.id for item in self.load_reviews()}
 
+    @staticmethod
+    def _artifact_id(value: str, label: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*", value
+        ):
+            raise SchemaError("%s has unsafe characters: %s" % (label, value))
+        return value
+
+    def suggestion_path(self, review_id: str, suggestion_id: str) -> Path:
+        review_id = self._artifact_id(review_id, "review ID")
+        suggestion_id = self._artifact_id(suggestion_id, "suggestion ID")
+        return self.suggestion_dir / review_id / ("%s.json" % suggestion_id)
+
+    def load_suggestion(self, review_id: str, suggestion_id: str) -> Any:
+        from .review_suggestions import ReviewSuggestion
+
+        path = self.suggestion_path(review_id, suggestion_id)
+        if not path.is_file():
+            raise SchemaError("suggestion artifact not found: %s" % suggestion_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SchemaError("invalid suggestion artifact %s: %s" % (path, exc)) from exc
+        suggestion = ReviewSuggestion.from_dict(raw)
+        if suggestion.id != suggestion_id or suggestion.review_id != review_id:
+            raise SchemaError("suggestion identity does not match its path: %s" % path)
+        return suggestion
+
+    def load_suggestions(self, review_id: str) -> List[Any]:
+        review_id = self._artifact_id(review_id, "review ID")
+        directory = self.suggestion_dir / review_id
+        if not directory.exists():
+            return []
+        values = []
+        for path in sorted(directory.glob("*.json")):
+            values.append(self.load_suggestion(review_id, path.stem))
+        return sorted(values, key=lambda value: (value.generated_at, value.id))
+
+    def write_suggestion(self, suggestion: Any) -> str:
+        from .review_suggestions import ReviewSuggestion
+
+        if not isinstance(suggestion, ReviewSuggestion):
+            raise TypeError("suggestion must be a ReviewSuggestion")
+        # Round-trip validation happens before the immutable artifact is written.
+        ReviewSuggestion.from_dict(suggestion.to_dict())
+        if suggestion.review_id not in self.load_review_ids():
+            raise SchemaError(
+                "suggestion refers to missing review: %s" % suggestion.review_id
+            )
+        path = self.suggestion_path(suggestion.review_id, suggestion.id)
+        if path.exists():
+            raise StorageError("suggestion artifact already exists: %s" % path)
+        atomic_write(path, json_bytes(suggestion.to_dict()))
+        return self._relative(path)
+
+    def review_run_path(self, run_id: str) -> Path:
+        run_id = self._artifact_id(run_id, "review run ID")
+        return self.review_run_dir / ("%s.json" % run_id)
+
+    def write_review_run_manifest(self, manifest: Dict[str, Any]) -> str:
+        validate_review_run_manifest(manifest)
+        path = self.review_run_path(manifest["run_id"])
+        if path.exists():
+            raise StorageError("review run manifest already exists: %s" % path)
+        for bucket in ("suggestions_created", "suggestions_reused"):
+            for review_id, suggestion_id in manifest[bucket].items():
+                self.load_suggestion(review_id, suggestion_id)
+        atomic_write(path, json_bytes(manifest))
+        return self._relative(path)
+
+    def iter_review_run_manifests(self) -> Iterable[Tuple[Path, Dict[str, Any]]]:
+        if not self.review_run_dir.exists():
+            return
+        for path in sorted(self.review_run_dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise SchemaError(
+                    "invalid review run manifest %s: %s" % (path, exc)
+                ) from exc
+            validate_review_run_manifest(raw)
+            for bucket in ("suggestions_created", "suggestions_reused"):
+                for review_id, suggestion_id in raw[bucket].items():
+                    self.load_suggestion(review_id, suggestion_id)
+            yield path, raw
+
     def state_path(self, source_path: str) -> Path:
         import hashlib
 
@@ -519,6 +609,20 @@ class KnowledgeRepository:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 validate_run_manifest(raw)
                 run_count += 1
+        known_review_ids = self.load_review_ids()
+        suggestion_count = 0
+        if self.suggestion_dir.exists():
+            for directory in sorted(self.suggestion_dir.iterdir()):
+                if not directory.is_dir():
+                    raise SchemaError(
+                        "unexpected file beneath suggestion directory: %s" % directory
+                    )
+                if directory.name not in known_review_ids:
+                    raise SchemaError(
+                        "suggestions refer to missing review: %s" % directory.name
+                    )
+                suggestion_count += len(self.load_suggestions(directory.name))
+        review_run_count = sum(1 for _ in self.iter_review_run_manifests())
         index_dir = self.knowledge_dir / "_index"
         if index_dir.exists():
             link_pattern = re.compile(r"\]\((\.\./[^)#]+\.md)\)")
@@ -543,6 +647,8 @@ class KnowledgeRepository:
             "review_items": review_count,
             "source_states": state_count,
             "run_manifests": run_count,
+            "suggestions": suggestion_count,
+            "review_run_manifests": review_run_count,
         }
         # A machine index is optional and never authoritative. When present,
         # report its state so callers can rebuild instead of trusting drift.

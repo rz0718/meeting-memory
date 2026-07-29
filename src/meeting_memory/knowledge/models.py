@@ -593,3 +593,87 @@ def validate_run_manifest(raw: Any) -> None:
     for key in ("candidates_rejected", "errors"):
         if not all(isinstance(item, dict) for item in raw[key]):
             raise SchemaError("run.%s must contain objects" % key)
+
+
+def validate_review_run_manifest(raw: Any) -> None:
+    """Validate an AI-review run without treating it as an ingestion run."""
+    if not isinstance(raw, dict):
+        raise SchemaError("review run manifest must be an object")
+    required = {
+        "schema_version",
+        "run_type",
+        "run_id",
+        "started_at",
+        "completed_at",
+        "status",
+        "model",
+        "prompt_version",
+        "filters",
+        "requested_review_ids",
+        "suggestions_created",
+        "suggestions_reused",
+        "failures",
+    }
+    if set(raw) != required:
+        raise SchemaError("review run manifest has missing or unknown fields")
+    if raw["schema_version"] != "1" or raw["run_type"] != "review_suggestions":
+        raise SchemaError("review run manifest has an unsupported schema or type")
+    _required_string(raw["run_id"], "review_run.run_id")
+    _timestamp(raw["started_at"], "review_run.started_at")
+    _timestamp(raw["completed_at"], "review_run.completed_at")
+    if raw["status"] not in RUN_STATUSES:
+        raise SchemaError("review run manifest has invalid status")
+    _required_string(raw["model"], "review_run.model")
+    _required_string(raw["prompt_version"], "review_run.prompt_version")
+    if not isinstance(raw["filters"], dict):
+        raise SchemaError("review_run.filters must be an object")
+    requested = raw["requested_review_ids"]
+    if (
+        not isinstance(requested, list)
+        or not all(isinstance(item, str) and item for item in requested)
+        or len(requested) != len(set(requested))
+    ):
+        raise SchemaError("review_run.requested_review_ids must be unique strings")
+    for key in ("suggestions_created", "suggestions_reused"):
+        value = raw[key]
+        if not isinstance(value, dict) or not all(
+            isinstance(review_id, str)
+            and review_id
+            and isinstance(suggestion_id, str)
+            and suggestion_id
+            for review_id, suggestion_id in value.items()
+        ):
+            raise SchemaError("review_run.%s must map review IDs to suggestion IDs" % key)
+    failures = raw["failures"]
+    if not isinstance(failures, list):
+        raise SchemaError("review_run.failures must be an array")
+    failed_ids = []
+    for failure in failures:
+        if not isinstance(failure, dict) or set(failure) != {
+            "review_id",
+            "error_type",
+            "error",
+        }:
+            raise SchemaError("review_run.failures entries have invalid fields")
+        failed_ids.append(_required_string(failure["review_id"], "failure.review_id"))
+        _required_string(failure["error_type"], "failure.error_type")
+        _required_string(failure["error"], "failure.error")
+    buckets = (
+        list(raw["suggestions_created"])
+        + list(raw["suggestions_reused"])
+        + failed_ids
+    )
+    if len(buckets) != len(set(buckets)) or set(buckets) != set(requested):
+        raise SchemaError(
+            "every requested review must appear exactly once in review-run results"
+        )
+    succeeded = len(raw["suggestions_created"]) + len(raw["suggestions_reused"])
+    expected_status = (
+        "success"
+        if not failures
+        else ("partial_failure" if succeeded else "failed")
+    )
+    if raw["status"] != expected_status:
+        raise SchemaError(
+            "review run status must be derived from its result buckets"
+        )
