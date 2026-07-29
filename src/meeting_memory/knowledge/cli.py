@@ -16,7 +16,14 @@ from .answers import (
     insufficient_answer,
     render_answer,
 )
-from .constants import CATEGORIES, CONFIDENCES, EXTRACTOR_VERSION, STATUSES
+from .constants import (
+    CATEGORIES,
+    CONFIDENCES,
+    EXTRACTOR_VERSION,
+    REVIEW_ACTIONS,
+    REVIEW_STATUSES,
+    STATUSES,
+)
 from .configuration import (
     config_path as _config_path,
     openrouter_configuration as _openrouter_configuration,
@@ -34,6 +41,8 @@ from .errors import (
     ConfigurationError,
     EvidenceError,
     KnowledgeError,
+    ReviewNotFoundError,
+    ReviewResolutionError,
     SchemaError,
     TransientExtractionError,
 )
@@ -48,6 +57,15 @@ from .presentation import (
     show_payload,
 )
 from .repository import KnowledgeRepository
+from .review import (
+    ReviewResolver,
+    exact_review,
+    list_reviews,
+    render_review_list,
+    render_review_show,
+    review_payload,
+    reviews_payload,
+)
 from .search import (
     SearchFilters,
     render_search_results,
@@ -258,6 +276,80 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_output(index)
 
+    review = commands.add_parser(
+        "review", help="list, inspect, and resolve human-review cases"
+    )
+    review_commands = review.add_subparsers(dest="review_command", required=True)
+
+    review_list = review_commands.add_parser("list", help="list review cases")
+    review_list.add_argument(
+        "--status",
+        choices=(*REVIEW_STATUSES, "all"),
+        default="pending",
+        help="review status to list (default: pending)",
+    )
+    review_list.add_argument(
+        "--priority",
+        choices=("conflict", "linked", "unlinked", "all"),
+        default="all",
+        help="review priority bucket",
+    )
+    review_list.add_argument(
+        "--reason", choices=("conflicting_evidence", "ambiguous_match")
+    )
+    review_list.add_argument("--category", choices=tuple(sorted(CATEGORIES)))
+    review_list.add_argument("--existing-id")
+    review_list.add_argument("--source", help="case-insensitive source-path substring")
+    review_list.add_argument("--limit", type=_positive)
+    _add_output(review_list)
+
+    review_show = review_commands.add_parser("show", help="show one exact review case")
+    review_show.add_argument("review_id")
+    review_show_output = review_show.add_mutually_exclusive_group()
+    review_show_output.add_argument(
+        "--raw", action="store_true", help="emit the review Markdown"
+    )
+    review_show_output.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
+    review_show.add_argument(
+        "--with-evidence",
+        action="store_true",
+        help="include safely bounded evidence excerpts",
+    )
+
+    review_resolve = review_commands.add_parser(
+        "resolve", help="apply an explicit human review decision"
+    )
+    review_resolve.add_argument("review_id")
+    review_resolve.add_argument("--action", required=True, choices=REVIEW_ACTIONS)
+    review_resolve.add_argument("--reviewer", required=True)
+    review_resolve.add_argument("--note", required=True)
+    review_resolve.add_argument(
+        "--existing-id", help="canonical object selected by the reviewer"
+    )
+    review_resolve.add_argument(
+        "--duplicate-of", help="pending review retained by merge-duplicate"
+    )
+    review_resolve.add_argument("--new-id", help="stable ID for create-separate")
+    review_resolve.add_argument("--title", help="override the promoted title")
+    review_resolve.add_argument("--status", choices=STATUSES)
+    review_resolve.add_argument("--owner")
+    review_resolve.add_argument("--clear-owner", action="store_true")
+    review_resolve.add_argument("--confidence", choices=CONFIDENCES)
+    review_resolve.add_argument("--effective-date", type=_iso_date)
+    review_resolve.add_argument("--clear-effective-date", action="store_true")
+    review_resolve.add_argument(
+        "--allow-stale-evidence",
+        action="store_true",
+        help="explicitly promote historical evidence whose source snapshot changed",
+    )
+    review_resolve.add_argument("--dry-run", action="store_true")
+    review_resolve.add_argument(
+        "--no-index", action="store_true", help="do not regenerate browse indexes"
+    )
+    _add_output(review_resolve)
+
     search = commands.add_parser("search", help="search durable knowledge deterministically")
     search.add_argument("query")
     search.add_argument("--category", choices=tuple(sorted(CATEGORIES)))
@@ -403,7 +495,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         detached_commands = {"index", "search", "show", "context", "ask", "validate"}
-        if args.allow_missing_evidence and args.command not in detached_commands:
+        detached_review = (
+            args.command == "review"
+            and args.review_command in ("list", "show")
+        )
+        if (
+            args.allow_missing_evidence
+            and args.command not in detached_commands
+            and not detached_review
+        ):
             raise ValueError(
                 "--allow-missing-evidence is limited to read-only consumption commands"
             )
@@ -463,6 +563,131 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("Unchanged %d files." % result.unchanged)
                 if args.dry_run:
                     print("Dry run: no files written.")
+            return 0
+
+        if args.command == "review":
+            if args.review_command == "list":
+                values = list_reviews(
+                    repository,
+                    status=None if args.status == "all" else args.status,
+                    priority=args.priority,
+                    reason=args.reason,
+                    category=args.category,
+                    existing_id=args.existing_id,
+                    source=args.source,
+                    limit=args.limit,
+                )
+                if args.json:
+                    print(
+                        json.dumps(
+                            reviews_payload(values),
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    print(render_review_list(values), end="")
+                return 0
+            if args.review_command == "show":
+                review_values = repository.load_reviews()
+                item = exact_review(repository, args.review_id, review_values)
+                if args.raw:
+                    if item.path is None:
+                        raise ReviewNotFoundError(
+                            "review item has no repository path: %s" % item.id
+                        )
+                    print(item.path.read_text(encoding="utf-8"), end="")
+                elif args.json:
+                    print(
+                        json.dumps(
+                            review_payload(
+                                repository,
+                                item,
+                                include_excerpts=args.with_evidence,
+                                review_values=review_values,
+                            ),
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    print(
+                        render_review_show(
+                            repository,
+                            item,
+                            include_excerpts=args.with_evidence,
+                            review_values=review_values,
+                        ),
+                        end="",
+                    )
+                return 0
+            result = ReviewResolver(repository).resolve(
+                args.review_id,
+                args.action,
+                args.reviewer,
+                args.note,
+                existing_id=args.existing_id,
+                duplicate_of=args.duplicate_of,
+                new_id=args.new_id,
+                title=args.title,
+                status=args.status,
+                owner=args.owner,
+                clear_owner=args.clear_owner,
+                confidence=args.confidence,
+                effective_date=(
+                    args.effective_date.isoformat()
+                    if args.effective_date is not None
+                    else None
+                ),
+                clear_effective_date=args.clear_effective_date,
+                allow_stale_evidence=args.allow_stale_evidence,
+                dry_run=args.dry_run,
+                refresh_indexes=not args.no_index,
+            )
+            if args.json:
+                print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            else:
+                mode = "Dry run" if result.dry_run else "Resolved"
+                print(
+                    "%s %s with action %s -> %s."
+                    % (
+                        mode,
+                        result.review_id,
+                        result.action,
+                        result.destination_status,
+                    )
+                )
+                print(
+                    "Affected objects: %s"
+                    % (", ".join(result.affected_object_ids) or "none")
+                )
+                for change in result.object_changes:
+                    before = change["before"]
+                    after = change["after"]
+                    print(
+                        "  %s: %s -> %s"
+                        % (
+                            after["id"],
+                            before["status"] if before else "new",
+                            after["status"],
+                        )
+                    )
+                    if before is None or before["statement"] != after["statement"]:
+                        print(
+                            "    statement: %s -> %s"
+                            % (
+                                before["statement"] if before else "none",
+                                after["statement"],
+                            )
+                        )
+                print("Changed paths:")
+                for path in result.changed_paths:
+                    print("  %s" % path)
+                if result.index_changed_paths:
+                    print(
+                        "Regenerated index paths: %d"
+                        % len(result.index_changed_paths)
+                    )
             return 0
 
         if args.command == "search":
@@ -642,11 +867,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise
         print("ERROR: temporary provider failure: %s" % exc, file=sys.stderr)
         return 75
-    except ObjectNotFoundError as exc:
+    except (ObjectNotFoundError, ReviewNotFoundError) as exc:
         if args.debug:
             raise
         print("ERROR: %s" % exc, file=sys.stderr)
         return 4
+    except ReviewResolutionError as exc:
+        if args.debug:
+            raise
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
     except InvalidContextBudgetError as exc:
         if args.debug:
             raise

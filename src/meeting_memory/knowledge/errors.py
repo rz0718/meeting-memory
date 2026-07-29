@@ -35,3 +35,15 @@ class StorageError(KnowledgeError):
 
 class InvalidInputError(KnowledgeError):
     """A user-supplied value cannot produce a valid deterministic result."""
+
+
+class ReviewNotFoundError(KnowledgeError):
+    """A requested review case does not exist."""
+
+
+class ReviewResolutionError(KnowledgeError):
+    """A review case cannot be resolved with the requested action."""
+
+
+class StaleReviewError(ReviewResolutionError):
+    """The evidence or canonical object changed after the review was created."""

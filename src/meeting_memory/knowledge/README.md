@@ -222,6 +222,44 @@ meeting-memory index      # rebuild knowledge/README.md + _index/
 meeting-memory ask "What is the withdrawal approval policy?"
 ```
 
+## Reviewing conflicts and ambiguous candidates
+
+Do not edit raw meeting or Slack files to resolve a review case. They are the
+evidence layer, and changing them invalidates stored fingerprints and line
+ranges. Use the review commands to make an explicit, audited decision:
+
+```bash
+meeting-memory review list
+meeting-memory review list --priority conflict --limit 20
+meeting-memory review show REVIEW_ID --with-evidence
+meeting-memory review resolve REVIEW_ID \
+  --action refine \
+  --reviewer "Rui" \
+  --note "Confirmed with the project owner." \
+  --dry-run
+```
+
+After checking the dry-run, repeat without `--dry-run`. Available actions:
+
+- `replace`: replace the matched canonical statement and candidate metadata;
+- `refine`: merge the candidate into the matched canonical object;
+- `reconfirm`: retain the canonical statement and append candidate evidence;
+- `create-separate`: create a distinct canonical object;
+- `keep-existing`: reject the candidate and retain canonical knowledge;
+- `merge-duplicate`: reject this case as a duplicate of another pending case
+  selected with `--duplicate-of`.
+
+`--existing-id` selects a canonical target when matching was ambiguous.
+`create-separate` accepts `--new-id`. Metadata can be reviewed with `--title`,
+`--status`, `--confidence`, `--owner`, and `--effective-date`. Older review
+files require explicit `--status` and `--confidence` when creating a separate
+object because those candidate fields were not preserved historically.
+
+Canonical and review-file changes are committed together. Resolutions record
+the reviewer, timestamp, action, rationale, and affected object IDs; then the
+browse and machine indexes are regenerated. The command refuses stale
+canonical snapshots and stale evidence by default.
+
 ## Adapting notes from another source
 
 If your notes come from something other than the Google sync, write a small

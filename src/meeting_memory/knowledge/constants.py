@@ -25,6 +25,15 @@ OUTCOMES = (
     "needs_review",
 )
 RUN_STATUSES = ("success", "partial_failure", "failed")
+REVIEW_STATUSES = ("pending", "resolved", "rejected")
+REVIEW_ACTIONS = (
+    "replace",
+    "refine",
+    "reconfirm",
+    "create-separate",
+    "keep-existing",
+    "merge-duplicate",
+)
 
 CATEGORY_PREFIX = {
     "decisions": "decision",
@@ -40,4 +49,3 @@ GENERATED_BEGIN = "<!-- BEGIN GENERATED STATEMENT -->"
 GENERATED_END = "<!-- END GENERATED STATEMENT -->"
 MANUAL_BEGIN = "<!-- BEGIN MANUAL NOTES -->"
 MANUAL_END = "<!-- END MANUAL NOTES -->"
-
