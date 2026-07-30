@@ -13,10 +13,10 @@ from .constants import CATEGORIES, CONFIDENCES, REVIEW_ACTIONS, STATUSES
 from .consumption import EvidenceReference
 from .errors import ExtractionError, ReviewResolutionError, SchemaError
 from .models import Evidence, KnowledgeObject, ReviewItem
-from .presentation import read_evidence_excerpt
+from .presentation import evidence_locator_state, read_evidence_excerpt
 from .review import ReviewResolver, possible_duplicate_ids, review_priority
 from .review_policy import advisory_automatic_eligibility
-from .util import sha256_bytes, sha256_file, utc_now
+from .util import EVIDENCE_DRIFTED, sha256_bytes, sha256_file, utc_now
 
 
 PROMPT_VERSION = "1"
@@ -68,8 +68,14 @@ Assess whether the candidate and existing claims concern the same durable fact;
 distinguish ideas, proposals, questions, approvals, completion, cancellation,
 and replacement; compare time, scope, owners, effective dates, numbers, policy,
 and system controls; require direct evidence for every material addition; and
-identify duplicate pending reviews. Treat stale or unreadable evidence as
-unreliable and never attempt to enable stale evidence.
+identify duplicate pending reviews.
+
+Every evidence block reports freshness. "current" means the source file is
+byte-identical to when the locator was recorded. "verified" means the file
+changed elsewhere but the recorded anchor still reads at the recorded lines, so
+the quotation is trustworthy. "drifted" means it no longer does. Treat drifted
+or unreadable evidence as unreliable and never attempt to enable stale
+evidence.
 
 Return JSON only with exactly these keys:
 suggested_action, confidence, existing_id, duplicate_of, new_id,
@@ -78,10 +84,28 @@ proposed_note, risks, requires_human.
 
 suggested_action is replace, refine, reconfirm, create-separate, keep-existing,
 merge-duplicate, or null. confidence is high, medium, or low. requires_human is
-a boolean. Evidence findings contain exactly source, line_start, line_end, and
+a boolean.
+
+Each action admits only its own parameters; every other identifier must be
+null. replace, refine, reconfirm, and keep-existing take existing_id and
+proposed_knowledge. create-separate takes new_id and proposed_knowledge.
+merge-duplicate takes duplicate_of only, so leave existing_id null even when
+the review names a possible existing object. A null action takes none of them.
+
+The packet's "review" is the one under assessment and "related_reviews" are the
+other pending reviews. duplicate_of names the review this one is a duplicate
+of, so it must be an id drawn from related_reviews and must never be the id of
+the review under assessment. existing_id and new_id likewise name a supplied
+canonical object and a new canonical object, never a review. Evidence findings contain exactly source, line_start, line_end, and
 finding, and may cite only supplied numbered ranges. proposed_knowledge is null
 or the exact complete resulting canonical fields: category, title, statement,
 status, effective_date, owner, confidence. Do not add an outcome field.
+
+rationale and proposed_note are both required non-empty strings, for every
+action including merge-duplicate and keep-existing. rationale explains the
+verdict; proposed_note is the note a reviewer would record on resolving this
+review. material_differences and risks are arrays of non-empty strings and may
+be empty arrays, never null.
 """
 USER_PROMPT_TEMPLATE = """BEGIN UNTRUSTED REVIEW PACKET
 %s
@@ -172,12 +196,16 @@ def _evidence_block(
         supplied_end = (
             excerpt.line_start + max(1, len(excerpt.text.splitlines())) - 1
         )
+    # The excerpt is widened for readability; the verdict must still be the one
+    # for the range that was actually recorded.
+    freshness = evidence_locator_state(repository, reference)
     return {
         "reference": reference.to_dict(),
         "supplied_line_start": excerpt.line_start,
         "supplied_line_end": supplied_end,
         "numbered_excerpt": _line_numbered(excerpt.text, excerpt.line_start),
-        "stale": excerpt.stale,
+        "freshness": freshness,
+        "stale": freshness == EVIDENCE_DRIFTED,
         "error": excerpt.error,
     }
 

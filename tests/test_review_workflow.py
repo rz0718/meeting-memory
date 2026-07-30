@@ -445,6 +445,44 @@ class ReviewWorkflowTest(unittest.TestCase):
         thread.join(1)
         self.assertTrue(acquired.is_set())
 
+    def test_unrelated_source_edit_does_not_block_resolution(self):
+        # Synced day-files are rewritten whenever any later message lands, so a
+        # changed digest alone must not strand a citation that is still exact.
+        existing = self.make_object()
+        self.make_review(existing=existing)
+        self.source.write_text(
+            "# Project update\n\nThe framework is complete.\n\nA later note arrived.\n",
+            encoding="utf-8",
+        )
+
+        result = self.resolver().resolve(
+            "review-framework",
+            "refine",
+            "Rui",
+            "The anchor still reads at the recorded lines.",
+        )
+
+        self.assertFalse(result.dry_run)
+        resolved = self.repository.load_reviews("resolved")[0]
+        self.assertFalse(resolved.allowed_stale_evidence)
+
+    def test_shifted_anchor_requires_explicit_override(self):
+        existing = self.make_object()
+        self.make_review(existing=existing)
+        # The anchor text survives, but no longer at the recorded line.
+        self.source.write_text(
+            "# Project update\n\nAn inserted line.\nThe framework is complete.\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(StaleReviewError):
+            self.resolver().resolve(
+                "review-framework",
+                "refine",
+                "Rui",
+                "A moved anchor is real drift.",
+            )
+
     def test_stale_candidate_evidence_requires_explicit_override(self):
         existing = self.make_object()
         self.make_review(existing=existing)

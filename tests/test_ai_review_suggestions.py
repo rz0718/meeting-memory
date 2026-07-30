@@ -592,6 +592,34 @@ class AIReviewSuggestionTest(unittest.TestCase):
             resolver_arguments_for_proposed_result(context, recommendation),
         )
 
+    def test_reverified_candidate_still_reaches_the_advisor(self):
+        # The original failure: an unrelated re-sync of the day-file marked every
+        # excerpt stale, which short-circuited the advisor and left the review
+        # permanently unassessable.
+        existing = self.make_object()
+        item = self.make_review(existing)
+        self.source.write_text(
+            "# Project update\n\nThe framework is complete.\n\nA later note arrived.\n",
+            encoding="utf-8",
+        )
+        advisor = FakeReviewAdvisor(self.repository, self.replace_response())
+
+        result = generate_review_suggestions(
+            self.repository,
+            [item],
+            advisor,
+            "anthropic/test-reviewer",
+            now_fn=lambda: FIXED_NOW,
+        )
+
+        self.assertEqual(1, len(advisor.calls))
+        block = advisor.calls[0].packet.value["candidate_evidence"][0]
+        self.assertFalse(block["stale"])
+        self.assertEqual("verified", block["freshness"])
+        suggestion_id = result.manifest["suggestions_created"][item.id]
+        suggestion = self.repository.load_suggestion(item.id, suggestion_id)
+        self.assertEqual("replace", suggestion.recommendation.suggested_action)
+
     def test_stale_candidate_short_circuits_without_advisor_call(self):
         existing = self.make_object()
         item = self.make_review(existing)

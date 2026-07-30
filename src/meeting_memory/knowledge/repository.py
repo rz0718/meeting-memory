@@ -32,8 +32,10 @@ from .models import (
     validate_source_state,
 )
 from .util import (
+    EVIDENCE_DRIFTED,
     atomic_write,
     dump_frontmatter,
+    evidence_freshness,
     json_bytes,
     parse_frontmatter,
     sha256_file,
@@ -676,17 +678,24 @@ class KnowledgeRepository:
             if not self.require_evidence_sources:
                 return
             raise EvidenceError("evidence source is missing: %s" % evidence.source)
-        if require_current_hash and evidence.source_sha256 != sha256_file(source_path):
-            raise EvidenceError("evidence fingerprint does not match: %s" % evidence.source)
         if require_current_hash:
             try:
-                line_count = len(source_path.read_text(encoding="utf-8").splitlines())
+                data = source_path.read_bytes()
+                lines = data.decode("utf-8").splitlines()
             except (OSError, UnicodeError) as exc:
                 raise EvidenceError("cannot read evidence source: %s" % evidence.source) from exc
-            if evidence.line_end > line_count:
+            if evidence.line_end > len(lines):
                 raise EvidenceError(
                     "evidence lines %d-%d exceed %s (%d lines)"
-                    % (evidence.line_start, evidence.line_end, evidence.source, line_count)
+                    % (evidence.line_start, evidence.line_end, evidence.source, len(lines))
+                )
+            # A changed digest alone is not drift: synced day-files are rewritten
+            # whenever any later message lands. Only reject when the recorded
+            # anchor no longer reads at the recorded lines.
+            if evidence_freshness(data, lines, evidence) == EVIDENCE_DRIFTED:
+                raise EvidenceError(
+                    "evidence anchor no longer appears at %s lines %d-%d"
+                    % (evidence.source, evidence.line_start, evidence.line_end)
                 )
 
     def validate_all(self) -> Dict[str, int]:

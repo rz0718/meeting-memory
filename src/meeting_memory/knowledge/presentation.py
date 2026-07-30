@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence, Tuple
@@ -10,6 +9,7 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 from .consumption import EvidenceReference, SearchDocument
 from .errors import EvidenceError, KnowledgeError
 from .repository import KnowledgeRepository
+from .util import EVIDENCE_DRIFTED, EVIDENCE_VERIFIED, evidence_freshness
 
 
 class ObjectNotFoundError(KnowledgeError):
@@ -25,6 +25,7 @@ class EvidenceExcerpt:
     text: Optional[str]
     stale: bool
     error: Optional[str]
+    freshness: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -35,6 +36,7 @@ class EvidenceExcerpt:
             "text": self.text,
             "stale": self.stale,
             "error": self.error,
+            "freshness": self.freshness,
         }
 
 
@@ -103,17 +105,40 @@ def read_evidence_excerpt(
     excerpt = "\n".join(lines[evidence.line_start - 1 : finish])
     if len(excerpt) > max_chars:
         excerpt = excerpt[: max(0, max_chars - 1)].rstrip() + "…"
-    digest = hashlib.sha256(data).hexdigest()
-    stale = bool(evidence.source_sha256 and digest != evidence.source_sha256)
+    freshness = evidence_freshness(data, lines, evidence)
     return EvidenceExcerpt(
         evidence.source,
         evidence.anchor,
         evidence.line_start,
         finish,
         excerpt,
-        stale,
+        freshness == EVIDENCE_DRIFTED,
         None,
+        freshness,
     )
+
+
+def evidence_locator_state(
+    repository: KnowledgeRepository, evidence: EvidenceReference
+) -> Optional[str]:
+    """Classify a locator without building an excerpt, or None if unreadable.
+
+    Callers that widen a locator to show surrounding context still need the
+    verdict for the range that was actually recorded, so they cannot read the
+    freshness off the widened excerpt.
+    """
+    try:
+        source_path = repository.evidence_path(evidence.source)
+    except EvidenceError:
+        return None
+    if not source_path.is_file():
+        return None
+    try:
+        data = source_path.read_bytes()
+        lines = data.decode("utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    return evidence_freshness(data, lines, evidence)
 
 
 def evidence_excerpts(
@@ -176,7 +201,9 @@ def render_show(
                 excerpt.line_end,
             )
             if excerpt.stale:
-                label += " [STALE SOURCE FINGERPRINT]"
+                label += " [DRIFTED: ANCHOR NOT AT THESE LINES]"
+            elif excerpt.freshness == EVIDENCE_VERIFIED:
+                label += " [SOURCE CHANGED ELSEWHERE; ANCHOR RE-VERIFIED]"
             lines.append(label)
             if excerpt.error:
                 lines.append("  Unavailable: %s" % excerpt.error)

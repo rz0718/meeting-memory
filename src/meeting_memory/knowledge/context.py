@@ -13,7 +13,7 @@ from .models import ReviewItem
 from .presentation import EvidenceExcerpt, evidence_excerpts
 from .repository import KnowledgeRepository
 from .search import SearchFilters, SearchResult, search_documents
-from .util import atomic_write, run_id
+from .util import EVIDENCE_VERIFIED, atomic_write, run_id
 
 
 class InvalidContextBudgetError(KnowledgeError):
@@ -225,7 +225,9 @@ def _object_block(
                 excerpt.line_end,
             )
             if excerpt.stale:
-                label += " — potentially stale fingerprint"
+                label += " — drifted; anchor no longer at these lines"
+            elif excerpt.freshness == EVIDENCE_VERIFIED:
+                label += " — source changed elsewhere; anchor re-verified"
             lines.append(label)
             if excerpt.error:
                 lines.append("  - Unavailable: %s" % excerpt.error)

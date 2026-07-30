@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import html
 import json
 import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import yaml
 
@@ -99,6 +100,51 @@ def jaccard(left: str, right: str) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / float(len(a | b))
+
+
+EVIDENCE_CURRENT = "current"
+EVIDENCE_VERIFIED = "verified"
+EVIDENCE_DRIFTED = "drifted"
+
+_EMOJI_SHORTCODE = re.compile(r":[a-z0-9_+-]+:")
+
+
+def anchor_in_text(anchor: str, text: str) -> bool:
+    """Whether a recorded evidence anchor still reads inside the given text.
+
+    Anchors are written by the extraction model while it reads a rendered
+    source, so they routinely drop Slack markup and emoji shortcodes that the
+    raw line still carries, and they spell "P&L" where the raw line holds the
+    escaped "P&amp;L". Both sides are unescaped, stripped of shortcodes,
+    reduced to space-joined alphanumeric tokens, and compared on whole-token
+    boundaries so that "tested" never matches "testing".
+    """
+    needle = _match_form(anchor)
+    if not needle:
+        return False
+    return " %s " % needle in " %s " % _match_form(text)
+
+
+def _match_form(value: str) -> str:
+    return normalize_text(_EMOJI_SHORTCODE.sub(" ", html.unescape(value)))
+
+
+def evidence_freshness(data: bytes, lines: Sequence[str], evidence: Any) -> str:
+    """Classify a stored evidence locator against the source as it reads now.
+
+    A whole-file digest answers "did any byte of this file change", which is
+    far broader than the question that matters for a citation: is the quoted
+    claim still at the recorded lines. Synced Slack day-files are rewritten
+    whenever any later message, reaction, or edit lands, so digest-only
+    checking marks untouched citations stale. Re-reading the anchor keeps the
+    guarantee while ignoring churn elsewhere in the file.
+    """
+    if not evidence.source_sha256 or sha256_bytes(data) == evidence.source_sha256:
+        return EVIDENCE_CURRENT
+    if evidence.line_end > len(lines):
+        return EVIDENCE_DRIFTED
+    span = "\n".join(lines[evidence.line_start - 1 : evidence.line_end])
+    return EVIDENCE_VERIFIED if anchor_in_text(evidence.anchor, span) else EVIDENCE_DRIFTED
 
 
 def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
