@@ -22,7 +22,14 @@ from .models import Evidence, KnowledgeCandidate, KnowledgeObject, ReviewItem
 from .presentation import read_evidence_excerpt
 from .reconcile import knowledge_id
 from .repository import KnowledgeRepository, mutation_locked
-from .util import iso_z, normalize_text, sha256_bytes, sha256_file, utc_now
+from .util import (
+    EVIDENCE_VERIFIED,
+    iso_z,
+    normalize_text,
+    sha256_bytes,
+    sha256_file,
+    utc_now,
+)
 
 
 def review_priority(item: ReviewItem) -> str:
@@ -43,12 +50,34 @@ def review_topic(item: ReviewItem) -> str:
     return normalize_text(value)
 
 
+def source_series(source: str) -> str:
+    """The recurring document a dated source file belongs to.
+
+    Sources are stored as `meetings/<date>/<document>.md`, so a synced Slack
+    channel produces a new path every day while remaining one continuous
+    document. Reducing a source to its series lets restatements of a standing
+    fact be recognized across days.
+    """
+    return Path(source).stem.casefold()
+
+
+def review_series(item: ReviewItem) -> set:
+    return {source_series(value) for value in item.sources}
+
+
 def reviews_look_duplicate(left: ReviewItem, right: ReviewItem) -> bool:
+    """Whether two pending reviews restate the same fact from the same origin.
+
+    Origin is compared by series rather than by exact path. A daily recap
+    channel restates a standing threshold under a fresh dated filename every
+    day, so requiring an identical source path made the commonest duplicate in
+    the queue -- the same threshold reworded tomorrow -- impossible to merge.
+    """
     return (
         left.id != right.id
         and left.candidate_category == right.candidate_category
         and set(left.possible_existing_ids) == set(right.possible_existing_ids)
-        and bool(set(left.sources) & set(right.sources))
+        and bool(review_series(left) & review_series(right))
         and review_topic(left) == review_topic(right)
     )
 
@@ -120,6 +149,14 @@ def list_reviews(
     if limit is not None:
         values = values[:limit]
     return tuple(values)
+
+
+def _freshness_label(excerpt: Dict[str, Any]) -> str:
+    if excerpt["stale"]:
+        return " [DRIFTED]"
+    if excerpt.get("freshness") == EVIDENCE_VERIFIED:
+        return " [RE-VERIFIED]"
+    return ""
 
 
 def _evidence_payload(
@@ -324,7 +361,7 @@ def render_review_show(
                         value["source"],
                         value["line_start"],
                         value["line_end"],
-                        " [STALE]" if excerpt["stale"] else "",
+                        _freshness_label(excerpt),
                     )
                 )
                 if excerpt["error"]:
@@ -1136,7 +1173,7 @@ class ReviewResolver:
                 )
             if not reviews_look_duplicate(item, other):
                 raise ReviewResolutionError(
-                    "reviews do not share the same category, target, source, and topic"
+                    "reviews do not share the same category, target, source series, and topic"
                 )
 
         resolved = copy.deepcopy(item)
