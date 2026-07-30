@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .constants import CONFIDENCES, REVIEW_ACTIONS, STATUSES
+from .constants import CONFIDENCES, RESOLUTION_MODES, REVIEW_ACTIONS, STATUSES
 from .consumption import EvidenceReference
 from .errors import (
     EvidenceError,
@@ -457,6 +457,7 @@ class ReviewRefresher:
         review_id: str,
         *,
         existing_id: Optional[str] = None,
+        adopt_existing: bool = False,
         dry_run: bool = False,
     ) -> ReviewRefreshResult:
         reviews = self.repository.load_reviews()
@@ -474,9 +475,14 @@ class ReviewRefresher:
                 )
             existing_id = item.possible_existing_ids[0]
         if existing_id not in item.possible_existing_ids:
-            raise ReviewResolutionError(
-                "refresh cannot change review identity; existing object is not in the review snapshot"
-            )
+            # A case opened with no candidate object shows a reviewer nothing to
+            # compare against. Naming its target is new information, not a
+            # change of identity, so adoption is allowed only when the review
+            # holds no target at all -- an existing linkage is never rewritten.
+            if not (adopt_existing and not item.possible_existing_ids):
+                raise ReviewResolutionError(
+                    "refresh cannot change review identity; existing object is not in the review snapshot"
+                )
         target = next(
             (
                 value
@@ -503,6 +509,8 @@ class ReviewRefresher:
         previous_statement = item.existing_statement
         previous_updated_at = item.existing_updated_at
         refreshed = copy.deepcopy(item)
+        if existing_id not in refreshed.possible_existing_ids:
+            refreshed.possible_existing_ids = [existing_id]
         refreshed.existing_statement = target.statement
         refreshed.existing_evidence = copy.deepcopy(target.evidence)
         refreshed.existing_updated_at = target.updated_at
@@ -807,6 +815,7 @@ class ReviewResolver:
         effective_date: Optional[str] = None,
         clear_effective_date: bool = False,
         allow_stale_evidence: bool = False,
+        resolution_mode: Optional[str] = None,
         dry_run: bool = False,
         refresh_indexes: bool = True,
     ) -> ReviewResolutionResult:
@@ -822,6 +831,10 @@ class ReviewResolver:
             raise ReviewResolutionError("review resolution requires an action")
         if action is not None and action not in REVIEW_ACTIONS:
             raise ReviewResolutionError("unsupported review action: %s" % action)
+        if resolution_mode is not None and resolution_mode not in RESOLUTION_MODES:
+            raise ReviewResolutionError(
+                "unsupported resolution mode: %s" % resolution_mode
+            )
         reviewer = reviewer.strip()
         note = note.strip()
         if not reviewer:
@@ -1194,7 +1207,11 @@ class ReviewResolver:
         resolved.suggestion_disposition = (
             "accepted" if accept_suggestion else "overridden"
         ) if suggestion is not None else "not_used"
-        resolved.resolution_mode = (
+        # A caller driving resolution programmatically must be able to say so.
+        # Deriving the mode from the presence of a suggestion alone recorded
+        # every scripted resolution as "human", which misstates the audit trail
+        # on exactly the decisions a reviewer most needs to distinguish.
+        resolved.resolution_mode = resolution_mode or (
             "hybrid" if suggestion is not None else "human"
         )
         resolved.path = (

@@ -482,9 +482,18 @@ class ReviewItem:
                 "review.resolution.verifier_model",
             )
             if suggestion_id is None:
-                if suggestion_disposition != "not_used" or resolution_mode != "human":
+                # A resolution can be reached by deterministic code rather than
+                # by a model, in which case there is no suggestion to disposition
+                # yet the decision was still not a human's. "automated" is
+                # allowed here so such a record can state that plainly instead of
+                # being filed as human judgement.
+                if suggestion_disposition != "not_used" or resolution_mode not in (
+                    "human",
+                    "automated",
+                ):
                     raise SchemaError(
-                        "resolution without a suggestion must be human/not_used"
+                        "resolution without a suggestion must be human or automated, "
+                        "with suggestion_disposition not_used"
                     )
                 if suggested_action is not None:
                     raise SchemaError(

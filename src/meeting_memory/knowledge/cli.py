@@ -20,6 +20,7 @@ from .constants import (
     CATEGORIES,
     CONFIDENCES,
     EXTRACTOR_VERSION,
+    RESOLUTION_MODES,
     REVIEW_ACTIONS,
     REVIEW_STATUSES,
     STATUSES,
@@ -407,6 +408,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--existing-id",
         help="canonical snapshot to refresh when the review has multiple possibilities",
     )
+    review_refresh.add_argument(
+        "--adopt-existing",
+        action="store_true",
+        help="bind --existing-id to a review that currently names no candidate object",
+    )
     review_refresh.add_argument("--dry-run", action="store_true")
     _add_output(review_refresh)
 
@@ -445,6 +451,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-stale-evidence",
         action="store_true",
         help="explicitly promote historical evidence whose source snapshot changed",
+    )
+    review_resolve.add_argument(
+        "--resolution-mode",
+        choices=RESOLUTION_MODES,
+        help="record how this decision was reached (default: human, or hybrid with a suggestion)",
     )
     review_resolve.add_argument("--dry-run", action="store_true")
     review_resolve.add_argument(
@@ -899,6 +910,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 result = ReviewRefresher(repository).refresh(
                     args.review_id,
                     existing_id=args.existing_id,
+                    adopt_existing=args.adopt_existing,
                     dry_run=args.dry_run,
                 )
                 if args.json:
@@ -946,6 +958,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ),
                 clear_effective_date=args.clear_effective_date,
                 allow_stale_evidence=args.allow_stale_evidence,
+                resolution_mode=args.resolution_mode,
                 dry_run=args.dry_run,
                 refresh_indexes=not args.no_index,
             )
