@@ -41,6 +41,8 @@ bot_token = xoxb-your-bot-token
 channel_ids =
   C0123456789
   G0123456789
+excluded_user_ids =
+  U0123456789
 ```
 
 The CLI automatically loads `meeting-memory.ini` from the current directory or
@@ -84,7 +86,10 @@ explicitly.
 The optional Slack settings provide:
 
 - `bot_token`: Slack bot token (or use `SLACK_BOT_TOKEN` in the scheduler environment);
-- `channel_ids`: comma-, whitespace-, or newline-separated public/private channel IDs.
+- `channel_ids`: comma-, whitespace-, or newline-separated public/private channel IDs;
+- `excluded_user_ids`: optional comma-, whitespace-, or newline-separated Slack
+  user IDs whose messages are omitted from snapshots and extraction. Thread
+  discovery still happens before filtering, so replies from other users remain.
 
 The bot must be a member of each channel and have `channels:history` for public
 channels or `groups:history` for private channels. `users:read` is optional; if

@@ -124,6 +124,21 @@ def _negated(value: str) -> bool:
     return bool(words & {"not", "never", "no", "cannot", "mustnt", "prohibited"})
 
 
+def conflicting_measurements(left: str, right: str) -> bool:
+    """Whether two statements carry different numbers, signs, or units.
+
+    Mirrors the guard _classify_change uses to stop a reworded threshold from
+    silently overwriting a different one, reused here so merging two canonical
+    objects cannot silently fold together statements that disagree on their
+    numeric payload.
+    """
+    left_numbers, left_units = _measurements(left)
+    right_numbers, right_units = _measurements(right)
+    changed_numbers = bool(left_numbers or right_numbers) and left_numbers != right_numbers
+    changed_units = bool(left_units or right_units) and left_units != right_units
+    return changed_numbers or changed_units
+
+
 class KnowledgeReconciler:
     """Uses stable identity, normalized text, and bounded token similarity."""
 

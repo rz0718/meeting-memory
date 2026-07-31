@@ -47,3 +47,11 @@ class ReviewResolutionError(KnowledgeError):
 
 class StaleReviewError(ReviewResolutionError):
     """The evidence or canonical object changed after the review was created."""
+
+
+class MergeError(KnowledgeError):
+    """Two canonical knowledge objects cannot be merged as requested."""
+
+
+class RemovalError(KnowledgeError):
+    """Canonical knowledge cannot be permanently removed as requested."""

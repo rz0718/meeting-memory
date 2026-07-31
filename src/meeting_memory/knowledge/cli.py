@@ -42,6 +42,8 @@ from .errors import (
     ConfigurationError,
     EvidenceError,
     KnowledgeError,
+    MergeError,
+    RemovalError,
     ReviewNotFoundError,
     ReviewResolutionError,
     SchemaError,
@@ -49,6 +51,8 @@ from .errors import (
 )
 from .extractors import FakeExtractor, OpenRouterExtractor
 from .indexes import generate_indexes
+from .merge import KnowledgeMerger
+from .removal import KnowledgeRemover
 from .openrouter import OpenRouterChatClient
 from .pipeline import KnowledgePipeline, PipelineResult
 from .presentation import (
@@ -83,7 +87,7 @@ from .search import (
     search_payload,
 )
 from .slack import SlackCollector
-from .util import atomic_write, local_today
+from .util import atomic_write, local_today, sha256_bytes
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -294,6 +298,65 @@ def build_parser() -> argparse.ArgumentParser:
         "--recent-days", type=_positive, default=30, help="recent-index window (default: 30)"
     )
     _add_output(index)
+
+    merge = commands.add_parser(
+        "merge", help="fold one canonical knowledge object into another"
+    )
+    merge.add_argument("loser_id", help="knowledge object to retire")
+    merge.add_argument(
+        "--into", dest="survivor_id", required=True, help="knowledge object to keep"
+    )
+    merge.add_argument("--reviewer", required=True)
+    merge.add_argument("--note", required=True)
+    merge.add_argument("--statement", help="override the survivor's statement")
+    merge.add_argument("--title", help="override the survivor's title")
+    merge.add_argument("--status", choices=STATUSES)
+    merge.add_argument("--owner")
+    merge.add_argument("--clear-owner", action="store_true")
+    merge.add_argument("--confidence", choices=CONFIDENCES)
+    merge.add_argument("--effective-date", type=_iso_date)
+    merge.add_argument("--clear-effective-date", action="store_true")
+    merge.add_argument(
+        "--allow-cross-category",
+        action="store_true",
+        help="allow merging objects from different categories",
+    )
+    merge.add_argument(
+        "--allow-conflicting-numbers",
+        action="store_true",
+        help="allow merging statements whose numbers, signs, or units disagree",
+    )
+    merge.add_argument("--dry-run", action="store_true")
+    merge.add_argument(
+        "--no-index", action="store_true", help="do not regenerate browse indexes"
+    )
+    _add_output(merge)
+
+    remove = commands.add_parser(
+        "remove", help="permanently remove canonical objects from an audited ID inventory"
+    )
+    remove.add_argument(
+        "--object-id-file",
+        required=True,
+        help="newline-delimited canonical object IDs approved for removal",
+    )
+    remove.add_argument(
+        "--confirm-count",
+        type=_positive,
+        required=True,
+        help="refuse removal unless the inventory contains exactly this many IDs",
+    )
+    remove.add_argument("--reviewer", required=True)
+    remove.add_argument("--note", required=True)
+    remove.add_argument(
+        "--inventory-sha256",
+        help="expected SHA-256 of the exact approved object-ID inventory",
+    )
+    remove.add_argument("--dry-run", action="store_true")
+    remove.add_argument(
+        "--no-index", action="store_true", help="do not regenerate browse indexes"
+    )
+    _add_output(remove)
 
     review = commands.add_parser(
         "review", help="list, inspect, and resolve human-review cases"
@@ -654,17 +717,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     meetings_dir,
                     slack.get("channel_ids", []),
                     token=_slack_token(slack),
+                    excluded_user_ids=slack.get("excluded_user_ids", []),
                 ).sync(start_date, end_date, dry_run=args.dry_run)
             if args.json:
                 print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
             else:
                 mode = "Dry run" if result.dry_run else "Sync"
                 print(
-                    "%s: %d Slack channels, %d messages, %d changed files, %d unchanged files."
+                    "%s: %d Slack channels, %d messages, %d excluded messages, "
+                    "%d changed files, %d unchanged files."
                     % (
                         mode,
                         result.channels,
                         result.messages,
+                        result.messages_excluded,
                         len(result.files_changed),
                         len(result.files_unchanged),
                     )
@@ -688,6 +754,109 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("Unchanged %d files." % result.unchanged)
                 if args.dry_run:
                     print("Dry run: no files written.")
+            return 0
+
+        if args.command == "merge":
+            result = KnowledgeMerger(repository).merge(
+                args.loser_id,
+                args.survivor_id,
+                args.reviewer,
+                args.note,
+                statement=args.statement,
+                title=args.title,
+                status=args.status,
+                owner=args.owner,
+                clear_owner=args.clear_owner,
+                confidence=args.confidence,
+                effective_date=(
+                    args.effective_date.isoformat()
+                    if args.effective_date is not None
+                    else None
+                ),
+                clear_effective_date=args.clear_effective_date,
+                allow_cross_category=args.allow_cross_category,
+                allow_conflicting_numbers=args.allow_conflicting_numbers,
+                dry_run=args.dry_run,
+                refresh_indexes=not args.no_index,
+            )
+            if args.json:
+                print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            else:
+                mode = "Dry run" if result.dry_run else "Merged"
+                print(
+                    "%s %s into %s: %d evidence entries added."
+                    % (mode, result.loser_id, result.survivor_id, result.evidence_added)
+                )
+                if result.before and result.before["statement"] != result.after["statement"]:
+                    print(
+                        "  statement: %s -> %s"
+                        % (result.before["statement"], result.after["statement"])
+                    )
+                if result.retargeted_review_ids:
+                    print(
+                        "Retargeted review items: %s"
+                        % ", ".join(result.retargeted_review_ids)
+                    )
+                if result.retargeted_object_ids:
+                    print(
+                        "Retargeted related objects: %s"
+                        % ", ".join(result.retargeted_object_ids)
+                    )
+                print("Changed paths:")
+                for path in result.changed_paths:
+                    print("  %s" % path)
+                if result.index_changed_paths:
+                    print(
+                        "Regenerated index paths: %d"
+                        % len(result.index_changed_paths)
+                    )
+            return 0
+
+        if args.command == "remove":
+            inventory_path = Path(args.object_id_file).expanduser().resolve()
+            inventory_data = inventory_path.read_bytes()
+            inventory_sha256 = sha256_bytes(inventory_data)
+            if (
+                args.inventory_sha256 is not None
+                and args.inventory_sha256 != inventory_sha256
+            ):
+                raise RemovalError(
+                    "object inventory SHA-256 does not match --inventory-sha256"
+                )
+            object_ids = [
+                line.strip()
+                for line in inventory_data.decode("utf-8").splitlines()
+                if line.strip()
+            ]
+            if len(object_ids) != len(set(object_ids)):
+                raise RemovalError("object inventory contains duplicate IDs")
+            if len(object_ids) != args.confirm_count:
+                raise RemovalError(
+                    "object inventory contains %d IDs, expected %d"
+                    % (len(object_ids), args.confirm_count)
+                )
+            result = KnowledgeRemover(repository).remove(
+                object_ids,
+                args.reviewer,
+                args.note,
+                inventory_sha256=inventory_sha256,
+                dry_run=args.dry_run,
+                refresh_indexes=not args.no_index,
+            )
+            if args.json:
+                print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            else:
+                mode = "Dry run" if result.dry_run else "Removed"
+                print("%s %d canonical objects." % (mode, len(result.object_ids)))
+                print("Updated related objects: %d" % len(result.updated_object_ids))
+                print("Updated reviews: %d" % len(result.updated_review_ids))
+                print("Updated source states: %d" % len(result.updated_source_states))
+                print("Cleanup manifest: %s" % result.manifest_path)
+                if result.index_changed_paths:
+                    print(
+                        "Regenerated index paths: %d"
+                        % len(result.index_changed_paths)
+                    )
             return 0
 
         if args.command == "review":
@@ -1191,6 +1360,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 4
     except ReviewResolutionError as exc:
+        if args.debug:
+            raise
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
+    except MergeError as exc:
+        if args.debug:
+            raise
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
+    except RemovalError as exc:
         if args.debug:
             raise
         print("ERROR: %s" % exc, file=sys.stderr)

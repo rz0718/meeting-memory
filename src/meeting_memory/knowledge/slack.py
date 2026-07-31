@@ -100,6 +100,7 @@ class SlackSyncResult:
     channels: int
     dates: List[str]
     messages: int
+    messages_excluded: int
     files_changed: List[str]
     files_unchanged: List[str]
     dry_run: bool
@@ -109,6 +110,7 @@ class SlackSyncResult:
             "channels": self.channels,
             "dates": self.dates,
             "messages": self.messages,
+            "messages_excluded": self.messages_excluded,
             "files_changed": self.files_changed,
             "files_unchanged": self.files_unchanged,
             "dry_run": self.dry_run,
@@ -146,15 +148,26 @@ class SlackCollector:
         token: Optional[str] = None,
         client: Optional[Any] = None,
         local_tz: Optional[dt.timezone] = None,
+        excluded_user_ids: Sequence[str] = (),
     ):
         self.meetings_dir = Path(meetings_dir).resolve()
         self.channel_ids = list(dict.fromkeys(channel_ids))
         invalid = [value for value in self.channel_ids if not re.fullmatch(r"[CDG][A-Z0-9]+", value)]
         if invalid:
             raise ConfigurationError("invalid Slack channel ID: %s" % invalid[0])
+        invalid_excluded = [
+            value
+            for value in excluded_user_ids
+            if not re.fullmatch(r"[UW][A-Z0-9]+", value)
+        ]
+        if invalid_excluded:
+            raise ConfigurationError(
+                "invalid excluded Slack user ID: %s" % invalid_excluded[0]
+            )
         resolved_token = token or os.environ.get("SLACK_BOT_TOKEN") or os.environ.get("SLACK_TOKEN")
         self.client = client or (SlackWebClient(resolved_token or "") if self.channel_ids else None)
         self.local_tz = local_tz or local_timezone()
+        self.excluded_user_ids = set(excluded_user_ids)
         self._user_names: Dict[str, str] = {}
 
     def _pages(self, method: str, params: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -388,14 +401,22 @@ class SlackCollector:
             dates.append(current.isoformat())
             current += dt.timedelta(days=1)
         if not self.channel_ids:
-            return SlackSyncResult(0, dates, 0, [], [], dry_run)
+            return SlackSyncResult(0, dates, 0, 0, [], [], dry_run)
 
         start = dt.datetime.combine(start_date, dt.time.min, tzinfo=self.local_tz)
         end = dt.datetime.combine(end_date, dt.time.min, tzinfo=self.local_tz)
         by_channel_date: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         total_messages = 0
+        excluded_messages = 0
         for channel_id in self.channel_ids:
             messages = self._history(channel_id, start, end)
+            retained_messages = [
+                message
+                for message in messages
+                if str(message.get("user") or "") not in self.excluded_user_ids
+            ]
+            excluded_messages += len(messages) - len(retained_messages)
+            messages = retained_messages
             total_messages += len(messages)
             for source_date in dates:
                 by_channel_date[(channel_id, source_date)] = []
@@ -420,5 +441,11 @@ class SlackCollector:
             for path, data in writes:
                 atomic_write(path, data)
         return SlackSyncResult(
-            len(self.channel_ids), dates, total_messages, changed, unchanged, dry_run
+            len(self.channel_ids),
+            dates,
+            total_messages,
+            excluded_messages,
+            changed,
+            unchanged,
+            dry_run,
         )

@@ -101,17 +101,29 @@ class SlackConfigurationTest(unittest.TestCase):
             path = Path(temporary) / "meeting-memory.ini"
             path.write_text(
                 "[paths]\nmeetings_dir = notes\noutput_dir = data\n"
-                "[slack]\nbot_token = local-token\nchannel_ids = C123, G456\n  C123\n",
+                "[slack]\nbot_token = local-token\nchannel_ids = C123, G456\n  C123\n"
+                "excluded_user_ids = U123, W456\n  U123\n",
                 encoding="utf-8",
             )
             configured = slack_configuration(str(path))
             self.assertEqual(["C123", "G456"], configured["channel_ids"])
+            self.assertEqual(["U123", "W456"], configured["excluded_user_ids"])
             self.assertEqual("local-token", configured["bot_token"])
 
     def test_invalid_channel_id_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "meeting-memory.ini"
             path.write_text("[slack]\nchannel_ids = C123;rm\n", encoding="utf-8")
+            with self.assertRaises(ConfigurationError):
+                slack_configuration(str(path))
+
+    def test_invalid_excluded_user_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "meeting-memory.ini"
+            path.write_text(
+                "[slack]\nexcluded_user_ids = TreasuryBot\n",
+                encoding="utf-8",
+            )
             with self.assertRaises(ConfigurationError):
                 slack_configuration(str(path))
 
@@ -215,6 +227,121 @@ class SlackCollectorTest(unittest.TestCase):
             )
             note = meetings / "2026-07-21" / "slack-c123.md"
             self.assertIn("durable_knowledge: false", note.read_text(encoding="utf-8"))
+            repository = KnowledgeRepository(Path(temporary) / "output", meetings)
+            self.assertEqual([], repository.qualifying_sources("2026-07-21"))
+
+    def test_excludes_configured_user_but_preserves_human_thread_replies(self):
+        day = dt.date(2026, 7, 21)
+        parent_ts = slack_ts(day, 9)
+
+        class BotThreadClient:
+            def call(self, method, params):
+                if method == "conversations.history":
+                    return {
+                        "ok": True,
+                        "messages": [
+                            {
+                                "type": "message",
+                                "user": "U08HN6U9A12",
+                                "username": "TreasuryBot",
+                                "text": "Generated recap.",
+                                "ts": parent_ts,
+                                "reply_count": 1,
+                            }
+                        ],
+                        "response_metadata": {"next_cursor": ""},
+                    }
+                if method == "conversations.replies":
+                    return {
+                        "ok": True,
+                        "messages": [
+                            {
+                                "type": "message",
+                                "user": "U08HN6U9A12",
+                                "username": "TreasuryBot",
+                                "text": "Generated recap.",
+                                "ts": parent_ts,
+                                "reply_count": 1,
+                            },
+                            {
+                                "type": "message",
+                                "user": "U1",
+                                "text": "Human correction.",
+                                "ts": slack_ts(day, 10),
+                                "thread_ts": parent_ts,
+                            },
+                        ],
+                        "response_metadata": {"next_cursor": ""},
+                    }
+                if method == "users.info":
+                    return {
+                        "ok": True,
+                        "user": {
+                            "id": params["user"],
+                            "profile": {"display_name": "Alice"},
+                        },
+                    }
+                raise AssertionError("unexpected Slack method %s" % method)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            meetings = Path(temporary) / "meetings"
+            collector = SlackCollector(
+                meetings,
+                ["C123"],
+                client=BotThreadClient(),
+                excluded_user_ids=["U08HN6U9A12"],
+            )
+
+            result = collector.sync(day, day + dt.timedelta(days=1))
+
+            self.assertEqual(1, result.messages)
+            self.assertEqual(1, result.messages_excluded)
+            text = (meetings / "2026-07-21" / "slack-c123.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("Generated recap.", text)
+            self.assertNotIn("TreasuryBot", text)
+            self.assertIn("Human correction.", text)
+            self.assertIn("Thread parent:", text)
+
+    def test_excluded_user_only_day_is_opted_out_of_extraction(self):
+        day = dt.date(2026, 7, 21)
+
+        class BotOnlyClient:
+            def call(self, method, params):
+                if method == "conversations.history":
+                    return {
+                        "ok": True,
+                        "messages": [
+                            {
+                                "type": "message",
+                                "user": "U08HN6U9A12",
+                                "username": "TreasuryBot",
+                                "text": "Generated recap.",
+                                "ts": slack_ts(day, 9),
+                            }
+                        ],
+                        "response_metadata": {"next_cursor": ""},
+                    }
+                raise AssertionError("unexpected Slack method %s" % method)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            meetings = Path(temporary) / "meetings"
+            collector = SlackCollector(
+                meetings,
+                ["C123"],
+                client=BotOnlyClient(),
+                excluded_user_ids=["U08HN6U9A12"],
+            )
+
+            result = collector.sync(day, day + dt.timedelta(days=1))
+
+            self.assertEqual(0, result.messages)
+            self.assertEqual(1, result.messages_excluded)
+            note = meetings / "2026-07-21" / "slack-c123.md"
+            text = note.read_text(encoding="utf-8")
+            self.assertIn("durable_knowledge: false", text)
+            self.assertNotIn("TreasuryBot", text)
             repository = KnowledgeRepository(Path(temporary) / "output", meetings)
             self.assertEqual([], repository.qualifying_sources("2026-07-21"))
 

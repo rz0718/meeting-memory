@@ -26,3 +26,6 @@ bot_token =
 channel_ids =
 #  C0123456789
 #  G0123456789
+# Optional Slack user IDs to omit from generated snapshots and extraction.
+excluded_user_ids =
+#  U0123456789

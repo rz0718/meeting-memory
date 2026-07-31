@@ -95,13 +95,13 @@ def openrouter_configuration(value: Optional[str]) -> Dict[str, str]:
 def slack_configuration(value: Optional[str]) -> Dict[str, Any]:
     """Load Slack source settings from the shared INI file.
 
-    Channel IDs may be comma-, whitespace-, or newline-separated. Keeping this
-    parsing here gives the interactive CLI and scheduled runner one definition
-    of the configured Slack source set.
+    Channel and excluded-user IDs may be comma-, whitespace-, or
+    newline-separated. Keeping this parsing here gives the interactive CLI and
+    scheduled runner one definition of the configured Slack source set.
     """
     path, parser = _parser(value)
     if not parser.has_section("slack"):
-        return {"channel_ids": []}
+        return {"channel_ids": [], "excluded_user_ids": []}
 
     raw_channels = parser.get("slack", "channel_ids", fallback="")
     channel_ids = []
@@ -115,8 +115,21 @@ def slack_configuration(value: Optional[str]) -> Dict[str, Any]:
             )
         channel_ids.append(channel_id)
 
+    raw_excluded_users = parser.get("slack", "excluded_user_ids", fallback="")
+    excluded_user_ids = []
+    for user_id in re.split(r"[\s,]+", raw_excluded_users.strip()):
+        if not user_id or user_id in excluded_user_ids:
+            continue
+        if not re.fullmatch(r"[UW][A-Z0-9]+", user_id):
+            raise ConfigurationError(
+                "configuration file %s has invalid excluded Slack user ID: %s"
+                % (path, user_id)
+            )
+        excluded_user_ids.append(user_id)
+
     return {
         "channel_ids": channel_ids,
+        "excluded_user_ids": excluded_user_ids,
         "bot_token": parser.get("slack", "bot_token", fallback="").strip(),
     }
 
