@@ -230,6 +230,37 @@ meeting-memory index      # rebuild knowledge/README.md + _index/
 meeting-memory ask "What is the withdrawal approval policy?"
 ```
 
+## Project-scoped search and questions
+
+A project is a saved source filter, not a new knowledge-object category. Create
+one with one or more repeatable meeting and Slack selectors, then use its name
+with `search`, `context`, or `ask`:
+
+```bash
+# "CCI" fuzzy-matches every non-Slack meeting filename containing CCI.
+# Slack channel/source names are exact matches, so C123 does not match C123-ops.
+meeting-memory project create CCI \
+  --meeting-name CCI \
+  --slack-name C123
+
+meeting-memory project list
+meeting-memory search "approval policy" --project CCI
+meeting-memory context "What changed?" --project CCI
+meeting-memory ask "What is the current CCI rollout status?" --project CCI
+```
+
+Project files are stored as JSON under
+`<output-dir>/.knowledge-state/projects/`. A knowledge object is admitted when
+at least one of its evidence sources matches; only its matching evidence is
+shown or accepted as an answer citation. Related objects and pending review
+items are also constrained to matching sources. An empty scope stays empty and
+`ask` returns an insufficient-evidence answer without calling the model.
+
+Recency scoring is relative to the newest confirmation inside the project, so
+scores from different projects are not directly comparable. Loading still
+validates evidence for the whole repository before applying the project filter;
+a broken source in another project can therefore fail a scoped command.
+
 ## Reviewing conflicts and ambiguous candidates
 
 Do not edit raw meeting or Slack files to resolve a review case. They are the

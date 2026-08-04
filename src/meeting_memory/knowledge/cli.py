@@ -61,6 +61,13 @@ from .presentation import (
     render_show,
     show_payload,
 )
+from .projects import (
+    ProjectScope,
+    load_project,
+    load_projects,
+    save_project,
+    scope_documents,
+)
 from .repository import KnowledgeRepository
 from .review import (
     ReviewRefresher,
@@ -526,8 +533,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_output(review_resolve)
 
+    ui = commands.add_parser(
+        "ui", help="serve the local review UI on loopback"
+    )
+    ui.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default: 127.0.0.1; the UI has no authentication)",
+    )
+    ui.add_argument("--port", type=_positive, default=8787)
+    ui.add_argument(
+        "--reviewer",
+        help="reviewer recorded on resolutions (default: MEETING_MEMORY_REVIEWER or rui)",
+    )
+    ui.add_argument("--model", help="review model used by suggestion generation")
+    ui.add_argument("--ask-model", help="model used by the Ask tab (overrides environment)")
+    ui.add_argument("--context-lines", type=_context_lines, default=5)
+    ui.add_argument("--timeout", type=_positive, default=120)
+
+    project = commands.add_parser(
+        "project", help="create and list saved source scopes"
+    )
+    project_commands = project.add_subparsers(
+        dest="project_command", required=True
+    )
+    project_list = project_commands.add_parser("list", help="list saved projects")
+    _add_output(project_list)
+    project_create = project_commands.add_parser(
+        "create", help="create a project from meeting and Slack source names"
+    )
+    project_create.add_argument("name", help="project name used by --project")
+    project_create.add_argument(
+        "--meeting-name",
+        "--meeting",
+        dest="meeting_names",
+        action="append",
+        default=[],
+        help="fuzzy meeting filename match; repeat to add names",
+    )
+    project_create.add_argument(
+        "--slack-name",
+        "--slack",
+        dest="slack_names",
+        action="append",
+        default=[],
+        help="exact Slack channel/source name; repeat to add names",
+    )
+    project_create.add_argument(
+        "--replace", action="store_true", help="replace an existing saved project"
+    )
+    _add_output(project_create)
+
     search = commands.add_parser("search", help="search durable knowledge deterministically")
     search.add_argument("query")
+    search.add_argument("--project", help="saved project scope")
     search.add_argument("--category", choices=tuple(sorted(CATEGORIES)))
     search.add_argument("--status", choices=tuple(sorted(STATUSES)))
     search.add_argument("--owner")
@@ -550,6 +609,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     context = commands.add_parser("context", help="build a bounded context packet")
     context.add_argument("query")
+    context.add_argument("--project", help="saved project scope")
     _add_context_options(context)
     context.add_argument("--output", type=Path)
     _add_output(context)
@@ -558,6 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
         "ask", help="answer a question from bounded durable knowledge"
     )
     ask.add_argument("query")
+    ask.add_argument("--project", help="saved project scope")
     _add_context_options(ask)
     ask.add_argument("--model", help="OpenRouter model (overrides environment)")
     ask.add_argument(
@@ -678,6 +739,16 @@ def _slack_token(configured: Dict[str, Any]) -> Optional[str]:
     )
 
 
+def _project_documents(repository: KnowledgeRepository, project_name: Optional[str]):
+    # Keep loading ahead of filtering: scoped reads intentionally retain the
+    # repository-wide evidence validation behavior of existing read commands.
+    documents = load_documents(repository)
+    if project_name is None:
+        return documents, None
+    scope = load_project(repository, project_name)
+    return scope_documents(scope, documents), scope
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -686,10 +757,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.command == "review"
             and args.review_command in ("list", "show")
         )
+        detached_project = (
+            args.command == "project" and args.project_command == "list"
+        )
         if (
             args.allow_missing_evidence
             and args.command not in detached_commands
             and not detached_review
+            and not detached_project
         ):
             raise ValueError(
                 "--allow-missing-evidence is limited to read-only consumption commands"
@@ -1177,8 +1252,90 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
             return 0
 
+        if args.command == "project":
+            if args.project_command == "list":
+                scopes = load_projects(repository)
+                if args.json:
+                    print(
+                        json.dumps(
+                            {"projects": [scope.to_dict() for scope in scopes]},
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                    )
+                elif not scopes:
+                    print("No saved projects.")
+                else:
+                    for scope in scopes:
+                        print(scope.name)
+                        print(
+                            "  Meetings: %s"
+                            % (", ".join(scope.meeting_names) or "none")
+                        )
+                        print(
+                            "  Slack: %s"
+                            % (", ".join(scope.slack_names) or "none")
+                        )
+                return 0
+            if not args.meeting_names and not args.slack_names:
+                raise ValueError(
+                    "project create needs at least one --meeting-name or --slack-name"
+                )
+            scope = ProjectScope(
+                name=args.name,
+                meeting_names=tuple(args.meeting_names),
+                slack_names=tuple(args.slack_names),
+            )
+            path = save_project(
+                repository, scope, replace_existing=args.replace
+            )
+            if args.json:
+                print(
+                    json.dumps(
+                        {"project": scope.to_dict(), "path": path},
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                print("Saved project %s: %s" % (scope.name, path))
+            return 0
+
+        if args.command == "ui":
+            try:
+                import uvicorn
+
+                from ..ui.app import create_app
+            except ImportError as exc:
+                raise ConfigurationError(
+                    "the review UI needs FastAPI and uvicorn: pip install "
+                    "'meeting-memory[ui]'"
+                ) from exc
+            if args.host != "127.0.0.1":
+                print(
+                    "WARNING: the review UI has no authentication; binding to %s "
+                    "exposes every write path on this host." % args.host,
+                    file=sys.stderr,
+                )
+            application = create_app(
+                repository,
+                reviewer=(
+                    args.reviewer
+                    or os.environ.get("MEETING_MEMORY_REVIEWER")
+                    or "rui"
+                ),
+                review_model=_review_model(args.model, openrouter),
+                ask_model=_ask_model(args.ask_model, openrouter),
+                api_key=_ask_api_key(openrouter),
+                timeout=args.timeout,
+                context_lines=args.context_lines,
+            )
+            print("Meeting Memory review UI: http://%s:%d" % (args.host, args.port))
+            uvicorn.run(application, host=args.host, port=args.port, log_level="info")
+            return 0
+
         if args.command == "search":
-            documents = load_documents(repository)
+            documents, _ = _project_documents(repository, args.project)
             filters = SearchFilters(
                 category=args.category,
                 status=args.status,
@@ -1223,7 +1380,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.command == "context":
-            documents = load_documents(repository)
+            documents, scope = _project_documents(repository, args.project)
             packet = build_context_packet(
                 repository,
                 documents,
@@ -1234,6 +1391,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 include_review_items=args.include_review_items,
                 include_manual_notes=args.include_manual_notes,
                 include_evidence_excerpts=args.include_evidence_excerpts,
+                source_predicate=(scope.matches_source if scope else None),
             )
             packet = write_context_packet(repository, packet, args.output)
             if args.json:
@@ -1244,7 +1402,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.command == "ask":
-            documents = load_documents(repository)
+            documents, scope = _project_documents(repository, args.project)
             packet = build_context_packet(
                 repository,
                 documents,
@@ -1255,6 +1413,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 include_review_items=args.include_review_items,
                 include_manual_notes=args.include_manual_notes,
                 include_evidence_excerpts=args.include_evidence_excerpts,
+                source_predicate=(scope.matches_source if scope else None),
             )
             if packet.selected:
                 client = OpenRouterChatClient(

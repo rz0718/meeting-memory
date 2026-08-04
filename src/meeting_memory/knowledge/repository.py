@@ -97,10 +97,62 @@ class KnowledgeRepository:
         self.review_run_dir = self.state_dir / "review-runs"
         self.outputs_dir = self.root / "outputs" / "Durable-Knowledge"
         self.logs_dir = self.root / "logs"
+        # Thread-local, so one request's cache can never be seen -- or resurrected
+        # after a write -- by another request served on a different thread.
+        self._read_cache_state = threading.local()
+
+    @property
+    def _read_cache(self) -> Optional[Dict[Any, Any]]:
+        return getattr(self._read_cache_state, "value", None)
+
+    @_read_cache.setter
+    def _read_cache(self, value: Optional[Dict[Any, Any]]) -> None:
+        self._read_cache_state.value = value
+
+    @contextmanager
+    def read_cache(self):
+        """Memoize corpus reads for the span of one read-only operation.
+
+        Loading the corpus parses every canonical and review file, and a single
+        rendered review asks for it many times over -- once directly, then again
+        inside every suggestion-currency check. Presenting one review against an
+        825-object repository took roughly fifteen seconds of repeated parsing.
+
+        The cache hands back the same mutable objects to every caller, so it is
+        only ever safe around code that reads. Every writer is mutation-locked,
+        and the lock suspends the cache for its whole scope, so no writer can
+        read from it or leave a mutated object behind in it.
+        """
+        if self._read_cache is not None:
+            yield
+            return
+        self._read_cache = {}
+        try:
+            yield
+        finally:
+            self._read_cache = None
+
+    def _cached(self, key: Any, compute):
+        cache = self._read_cache
+        if cache is None:
+            return compute()
+        if key not in cache:
+            cache[key] = compute()
+        return cache[key]
 
     @contextmanager
     def mutation_lock(self):
         """Serialize all canonical, review, evidence, and index mutations."""
+        suspended = self._read_cache
+        self._read_cache = None
+        try:
+            with self._mutation_lock():
+                yield
+        finally:
+            self._read_cache = suspended
+
+    @contextmanager
+    def _mutation_lock(self):
         lock_path = (self.state_dir / "mutation.lock").resolve()
         key = str(lock_path)
         with _MUTATION_LOCKS_GUARD:
@@ -141,7 +193,7 @@ class KnowledgeRepository:
         for status in REVIEW_STATUSES:
             (self.review_dir / status).mkdir(parents=True, exist_ok=True)
         self.suggestion_dir.mkdir(parents=True, exist_ok=True)
-        for child in ("sources", "runs", "review-runs"):
+        for child in ("sources", "runs", "review-runs", "projects"):
             (self.state_dir / child).mkdir(parents=True, exist_ok=True)
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -263,6 +315,9 @@ class KnowledgeRepository:
         return obj
 
     def load_knowledge(self) -> List[KnowledgeObject]:
+        return self._cached("knowledge", self._load_knowledge)
+
+    def _load_knowledge(self) -> List[KnowledgeObject]:
         objects = []
         seen: Dict[str, Path] = {}
         if not self.knowledge_dir.exists():
@@ -493,6 +548,9 @@ class KnowledgeRepository:
     def load_reviews(self, status: Optional[str] = None) -> List[ReviewItem]:
         if status is not None and status not in REVIEW_STATUSES:
             raise ValueError("unsupported review status: %s" % status)
+        return self._cached(("reviews", status), lambda: self._load_reviews(status))
+
+    def _load_reviews(self, status: Optional[str] = None) -> List[ReviewItem]:
         statuses = (status,) if status else REVIEW_STATUSES
         values = []
         seen = set()
@@ -551,6 +609,12 @@ class KnowledgeRepository:
         return self.suggestion_dir / review_id / ("%s.json" % suggestion_id)
 
     def load_suggestion(self, review_id: str, suggestion_id: str) -> Any:
+        return self._cached(
+            ("suggestion", review_id, suggestion_id),
+            lambda: self._load_suggestion(review_id, suggestion_id),
+        )
+
+    def _load_suggestion(self, review_id: str, suggestion_id: str) -> Any:
         from .review_suggestions import ReviewSuggestion
 
         path = self.suggestion_path(review_id, suggestion_id)
@@ -566,6 +630,11 @@ class KnowledgeRepository:
         return suggestion
 
     def load_suggestions(self, review_id: str) -> List[Any]:
+        return self._cached(
+            ("suggestions", review_id), lambda: self._load_suggestions(review_id)
+        )
+
+    def _load_suggestions(self, review_id: str) -> List[Any]:
         review_id = self._artifact_id(review_id, "review ID")
         directory = self.suggestion_dir / review_id
         if not directory.exists():

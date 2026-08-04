@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .consumption import SearchDocument, normalize_phrase, normalize_query, stemmed
 from .errors import KnowledgeError
@@ -167,6 +167,7 @@ def connected_reviews(
     reviews: Sequence[ReviewItem],
     selected: Sequence[SelectedDocument],
     query: str,
+    source_predicate: Optional[Callable[[str], bool]] = None,
 ) -> Tuple[ReviewItem, ...]:
     ids = {item.document.id for item in selected}
     sources = {
@@ -176,6 +177,15 @@ def connected_reviews(
     for review in reviews:
         if review.status != "pending":
             continue
+        if source_predicate is not None:
+            sources_in_scope = [
+                source for source in review.sources if source_predicate(source)
+            ]
+            if not sources_in_scope:
+                continue
+            # Review sources are rendered in packets, so prune a straddling
+            # review just as scope_documents prunes a straddling object.
+            review = replace(review, sources=sources_in_scope)
         connected = bool(ids & set(review.possible_existing_ids))
         connected = connected or bool(sources & set(review.sources))
         connected = connected or _strong_text_match(query, review.title)
@@ -326,6 +336,7 @@ def build_context_packet(
     include_review_items: bool = True,
     include_manual_notes: bool = False,
     include_evidence_excerpts: bool = False,
+    source_predicate: Optional[Callable[[str], bool]] = None,
 ) -> ContextPacket:
     if max_chars < 1:
         raise ValueError("max_chars must be at least 1")
@@ -341,7 +352,12 @@ def build_context_packet(
         for item in select_context_documents(documents, query, limit)
     ]
     reviews = list(
-        connected_reviews(repository.load_reviews("pending"), selected, query)
+        connected_reviews(
+            repository.load_reviews("pending"),
+            selected,
+            query,
+            source_predicate=source_predicate,
+        )
         if include_review_items
         else ()
     )

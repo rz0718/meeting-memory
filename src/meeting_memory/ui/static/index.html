@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meeting Memory review</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232383E2'/%3E%3Ctext x='8' y='12' font-family='sans-serif' font-size='11' font-weight='700' fill='white' text-anchor='middle'%3EM%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="sidebar">
+        <div class="sidebar__head">
+          <span class="sidebar__mark">M</span>
+          <span>Meeting Memory</span>
+        </div>
+        <nav class="sidebar__nav" id="sidebar-nav"></nav>
+        <div class="sidebar__foot" id="sidebar-foot"></div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="ghost" id="toggle-sidebar" title="Collapse sidebar"></button>
+          <div class="topbar__title" id="page-title"></div>
+          <button class="ghost" id="open-finder" title="Quick find (⌘K)"></button>
+          <button class="ghost" id="reviewer-chip" title="Change reviewer"></button>
+          <button class="ghost" id="toggle-theme" title="Toggle theme"></button>
+        </header>
+        <div class="view-tabs" id="view-tabs"></div>
+        <div class="filter-bar" id="filter-bar"></div>
+        <div class="content" id="content"></div>
+      </main>
+    </div>
+
+    <div class="scrim" id="scrim"></div>
+    <aside class="peek" id="peek" aria-hidden="true">
+      <div class="peek__head">
+        <div class="peek__title" id="peek-title"></div>
+        <button class="ghost" id="peek-expand" title="Expand to full page"></button>
+        <button class="ghost" id="peek-close" title="Close"></button>
+      </div>
+      <div class="peek__body" id="peek-body"></div>
+    </aside>
+
+    <div class="dialog" id="finder">
+      <div class="dialog__panel">
+        <input
+          class="finder__input"
+          id="finder-input"
+          placeholder="Jump to a review or knowledge object by ID or title…"
+          autocomplete="off"
+        />
+        <div class="finder__results" id="finder-results"></div>
+      </div>
+    </div>
+
+    <div class="dialog" id="modal">
+      <div class="dialog__panel">
+        <div class="dialog__head" id="modal-title"></div>
+        <div class="dialog__body" id="modal-body"></div>
+        <div class="dialog__foot" id="modal-foot"></div>
+      </div>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
+
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>

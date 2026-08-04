@@ -485,3 +485,54 @@ support the candidate, evidence-promoting actions (`replace`, `refine`,
 override is stored in the resolution record. It is not valid with
 `keep-existing` or `merge-duplicate`, because those actions do not promote the
 candidate evidence.
+
+## Local review UI
+
+`meeting-memory ui` serves a two-tab web UI on `127.0.0.1:8787` for the morning
+routine: see what last night's run inserted, then work the review queue with AI
+suggestions a human can modify and decide.
+
+```bash
+python3 -m pip install -e '.[ui]'
+meeting-memory ui
+# Optional: a different port, reviewer, or review model.
+meeting-memory ui --port 9000 --reviewer rui --model google/gemini-3.6-flash
+```
+
+The server binds to loopback and has no authentication, because it exposes every
+write path below. Binding elsewhere with `--host` prints a warning; do not do it
+on a shared machine.
+
+**Today's Knowledge** renders a run manifest grouped by what changed — created,
+refined, reconfirmed, sent to review — with evidence excerpts one click away at
+their real source line numbers. Its two actions are the audited paths the CLI
+already provides: merge into another object, and flag for removal. Flagging adds
+an ID to a session basket; previewing writes the exact newline-delimited ID
+inventory and reports the count and SHA-256 that the apply call asserts, so only
+the bytes you approved can execute.
+
+**Review queue** is `review triage` as a screen, with the same gates. It shows
+existing and candidate side by side with a word-level diff, the AI suggestion as
+a comment thread, and a form for the decision. Selecting the suggested action
+and touching nothing sends `--accept-suggestion` and is recorded as `accepted`;
+touching any radio or field sends the same `--suggestion-id` as an explicit
+override and is recorded as `overridden`. A badge states which one the audit
+trail will say before you apply.
+
+Every write goes through `ReviewResolver`, `ReviewRefresher`, `KnowledgeMerger`,
+or `KnowledgeRemover` — the same objects the CLI wraps — and every write is
+gated on a dry run whose preview you have seen. The server refuses an apply
+whose arguments differ from the previewed decision. There is no bulk accept, no
+inline auto-save, and no undo: reversing a decision is a new audited action.
+
+Canonical drift replaces the action panel with a guided refresh (`refresh
+--dry-run` → apply → regenerate the suggestion), because the resolver refuses
+drifted resolutions by design and there is no override. Drifted candidate
+evidence shows an `Allow stale evidence` checkbox only for the four
+evidence-promoting actions, with the override recorded permanently.
+
+Keyboard: `1`/`2` switch tabs, `j`/`k` move through the queue, `a` accepts and
+previews, `o` focuses the action radios, `d` defers, `Enter` applies from an
+open preview, and `⌘K` / `Ctrl+K` jumps to a review or object by ID or title.
+
+Raw meeting and Slack notes are never editable or writable from the UI.

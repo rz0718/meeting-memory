@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 import datetime as dt
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from .errors import (
     AuthenticationError,
@@ -151,15 +151,36 @@ def generate_review_suggestions(
     force: bool = False,
     filters: Optional[Dict[str, Any]] = None,
     now_fn: Any = utc_now,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> SuggestionBatchResult:
-    """Generate each review independently and always persist a run manifest."""
+    """Generate each review independently and always persist a run manifest.
+
+    ``on_progress`` is a purely observational hook: it is called once as each
+    review starts and once with that review's outcome, so a long batch can be
+    reported item by item. It cannot change any decision, and a batch driven
+    without it behaves identically.
+    """
     started_at = _timestamp(now_fn)
     created: Dict[str, str] = {}
     reused: Dict[str, str] = {}
     failures = []
     all_pending = repository.load_reviews("pending")
     objects = repository.load_knowledge()
-    for item in reviews:
+
+    def report(event: Dict[str, Any]) -> None:
+        if on_progress is not None:
+            on_progress(event)
+
+    total = len(reviews)
+    for position, item in enumerate(reviews, 1):
+        report(
+            {
+                "event": "start",
+                "review_id": item.id,
+                "position": position,
+                "total": total,
+            }
+        )
         try:
             context = build_suggestion_context(
                 repository,
@@ -177,6 +198,16 @@ def generate_review_suggestions(
                 ]
                 if matches:
                     reused[item.id] = matches[-1].id
+                    report(
+                        {
+                            "event": "item",
+                            "review_id": item.id,
+                            "position": position,
+                            "total": total,
+                            "outcome": "reused",
+                            "suggestion_id": matches[-1].id,
+                        }
+                    )
                     continue
             recommendation = (
                 unusable_evidence_recommendation()
@@ -197,12 +228,32 @@ def generate_review_suggestions(
             )
             repository.write_suggestion(suggestion)
             created[item.id] = suggestion.id
-        except Exception as exc:
-            failures.append(
+            report(
                 {
+                    "event": "item",
                     "review_id": item.id,
-                    "error_type": _failure_type(exc),
-                    "error": "%s: %s" % (type(exc).__name__, exc),
+                    "position": position,
+                    "total": total,
+                    "outcome": "created",
+                    "suggestion_id": suggestion.id,
+                    "suggested_action": recommendation.suggested_action,
+                    "confidence": recommendation.confidence,
+                }
+            )
+        except Exception as exc:
+            failure = {
+                "review_id": item.id,
+                "error_type": _failure_type(exc),
+                "error": "%s: %s" % (type(exc).__name__, exc),
+            }
+            failures.append(failure)
+            report(
+                {
+                    "event": "item",
+                    "position": position,
+                    "total": total,
+                    "outcome": "failed",
+                    **failure,
                 }
             )
     succeeded = len(created) + len(reused)

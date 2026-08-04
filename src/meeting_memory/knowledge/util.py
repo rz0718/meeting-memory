@@ -51,6 +51,34 @@ def local_timezone() -> dt.timezone:
         ) from exc
 
 
+def local_timezone_offset_minutes() -> int:
+    offset = local_timezone().utcoffset(None)
+    return int(offset.total_seconds() // 60)
+
+
+def local_timezone_label() -> str:
+    """Short name to print beside a time rendered in the operating calendar.
+
+    A displayed time that does not say which zone it is in is a trap in a tool
+    whose stored timestamps are all UTC. ``MEETING_TZ_UTC_OFFSET_HOURS`` carries
+    only an offset, so the common case gets its real name and anything else
+    falls back to the unambiguous offset form rather than guessing at one.
+    """
+    explicit = os.environ.get("MEETING_TZ_LABEL", "").strip()
+    if explicit:
+        return explicit
+    minutes = local_timezone_offset_minutes()
+    if minutes == 480:
+        return "SGT"
+    if minutes == 0:
+        return "UTC"
+    hours, remainder = divmod(abs(minutes), 60)
+    sign = "+" if minutes > 0 else "-"
+    if remainder:
+        return "UTC%s%d:%02d" % (sign, hours, remainder)
+    return "UTC%s%d" % (sign, hours)
+
+
 def local_today() -> dt.date:
     return dt.datetime.now(local_timezone()).date()
 
