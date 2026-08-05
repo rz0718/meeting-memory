@@ -504,7 +504,7 @@ The server binds to loopback and has no authentication, because it exposes every
 write path below. Binding elsewhere with `--host` prints a warning; do not do it
 on a shared machine.
 
-**Today's Knowledge** renders a run manifest grouped by what changed — created,
+**Knowledge Updates** renders a run manifest grouped by what changed — created,
 refined, reconfirmed, sent to review — with evidence excerpts one click away at
 their real source line numbers. Its two actions are the audited paths the CLI
 already provides: merge into another object, and flag for removal. Flagging adds

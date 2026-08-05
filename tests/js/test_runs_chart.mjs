@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   chartSeries,
+  fullDateLabel,
   pointX,
   yTicks,
 } from "../../src/meeting_memory/ui/static/js/runs_chart.js";
@@ -32,6 +33,15 @@ test("chartSeries exposes compact UTC dates and created-object counts", () => {
     dateLabel: "Jul 29",
     count: 7,
   });
+});
+
+test("fullDateLabel renders an English UTC calendar date", () => {
+  assert.equal(fullDateLabel("2026-08-04T12:50:00Z"), "August 4, 2026");
+});
+
+test("fullDateLabel preserves malformed values", () => {
+  assert.equal(fullDateLabel("not-a-date"), "not-a-date");
+  assert.equal(fullDateLabel(""), "—");
 });
 
 test("yTicks returns an integer scale above the largest count", () => {

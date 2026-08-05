@@ -1,4 +1,4 @@
-// Tab 1 — Today's Knowledge.
+// Tab 1 — Knowledge Updates.
 //
 // Purpose: verify what the pipeline decided on its own. These changes were
 // applied without a human, so the tab is grouped by manifest bucket ("what
@@ -9,7 +9,7 @@ import { api } from "./api.js";
 import { badge, el, icon, instant, mount, statusCue, timezoneSuffix } from "./dom.js";
 import { openObjectPeek } from "./objects.js";
 import { openReviewPeek } from "./reviewpeek.js";
-import { chartSeries, pointX, yTicks } from "./runs_chart.js";
+import { chartSeries, fullDateLabel, pointX, yTicks } from "./runs_chart.js";
 import { busy, empty, reportError } from "./ui.js";
 import { emit } from "./store.js";
 
@@ -27,9 +27,9 @@ const state = {
 
 export const runsView = {
   id: "runs",
-  label: "Today's Knowledge",
+  label: "Updates",
   icon: "layers",
-  title: "Today's Knowledge",
+  title: "Knowledge Updates",
 
   count() {
     return state.detail ? state.detail.summary.counts.objects_created : null;
@@ -309,7 +309,7 @@ function runPage(ctx) {
       : statusCue("critical", "failed");
 
   return el("div", {}, [
-    el("div", { class: "page-title", text: summary.started_at.slice(0, 10) }),
+    el("div", { class: "page-title", text: fullDateLabel(summary.started_at) }),
     el("div", { class: "page-sub" }, [
       instant(summary.started_at),
       el("span", { text: " → " }),

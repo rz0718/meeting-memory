@@ -1871,6 +1871,10 @@ class StaticAssetTest(UiTestCase):
         self.assertNotIn("Inserted from", source)
         self.assertNotIn("Clear range", source)
         self.assertIn("state.runs = await api.runs()", source)
+        self.assertIn('label: "Updates"', source)
+        self.assertIn('title: "Knowledge Updates"', source)
+        self.assertNotIn("Today's Knowledge", source)
+        self.assertIn("fullDateLabel(summary.started_at)", source)
 
 
 if __name__ == "__main__":

@@ -17,10 +17,36 @@ const MONTHS = [
   "Dec",
 ];
 
+const FULL_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
 function compactDate(isoDate) {
   const [, month, day] = String(isoDate).split("-").map(Number);
   if (!month || !day || !MONTHS[month - 1]) return String(isoDate || "—");
   return `${MONTHS[month - 1]} ${String(day).padStart(2, "0")}`;
+}
+
+export function fullDateLabel(value) {
+  const date = String(value || "").slice(0, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return value ? String(value) : "—";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!FULL_MONTHS[month - 1] || day < 1 || day > 31) return String(value);
+  return `${FULL_MONTHS[month - 1]} ${day}, ${year}`;
 }
 
 export function chartSeries(runs, limit = 12) {
