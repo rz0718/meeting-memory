@@ -19,9 +19,11 @@ from fastapi import APIRouter, Request
 from ..knowledge.answers import KnowledgeAnswer, insufficient_answer
 from ..knowledge.consumption import load_documents
 from ..knowledge.context import ContextPacket, build_context_packet
+from ..knowledge.projects import scoped_documents
 from ..knowledge.util import atomic_write, run_id, utc_now
 from .arguments import AskRequest, SaveAnswerRequest, context_arguments
 from .ask_payloads import context_payload, render_saved_answer, with_citations
+from .project_payloads import scope_receipt
 from .service import UiService
 
 
@@ -40,14 +42,30 @@ def _retrieve(
     Both are produced before any provider call so the excerpts, the omissions,
     and the exact bytes sent to the model all come from a single consistent read
     of the repository.
+
+    A project narrows the documents handed to the builder and supplies the same
+    source predicate ``ask --project`` supplies, so search, one-hop relation
+    expansion, and connected review items are all bounded by the one scope. The
+    scope can only narrow: an empty scope produces an empty packet, which the
+    answer route reports as such rather than retrying without it.
     """
     arguments = context_arguments(body)
     with service.read_cache():
         documents = load_documents(service.repository)
-        packet = build_context_packet(
-            service.repository, documents, body.query, **arguments
+        scoped, scope = scoped_documents(
+            service.repository, body.project or None, documents
         )
-        payload = context_payload(service.repository, packet, arguments)
+        receipt = (
+            scope_receipt(scope, documents, scoped) if scope is not None else None
+        )
+        packet = build_context_packet(
+            service.repository,
+            scoped,
+            body.query,
+            source_predicate=(scope.matches_source if scope else None),
+            **arguments
+        )
+        payload = context_payload(service.repository, packet, arguments, receipt)
     return packet, payload, arguments
 
 

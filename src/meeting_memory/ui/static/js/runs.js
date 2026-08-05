@@ -72,7 +72,7 @@ function filterBar(ctx) {
       el("option", {
         value: run.run_id,
         selected: run.run_id === state.runId,
-        text: `${run.run_id} · ${run.started_at.slice(0, 10)} UTC · ${run.status}`,
+        text: run.started_at.slice(0, 10),
       })
     )
   );
@@ -94,11 +94,11 @@ function filterBar(ctx) {
     },
   });
 
-  const utcNote = "Run IDs and this filter use the manifest's UTC date; the "
+  const utcNote = "Run dates and this filter use the manifest's UTC date; the "
     + "timestamps on the page are shown in " + timezoneSuffix() + ".";
   return [
     el("span", { class: "chip", title: utcNote }, [
-      el("span", { class: "chip__label", text: "Run" }),
+      el("span", { class: "chip__label", text: "Run date" }),
       runSelect,
     ]),
     el("span", { class: "chip", title: utcNote }, [
@@ -173,7 +173,7 @@ function runPage(ctx) {
       : statusCue("critical", "failed");
 
   return el("div", {}, [
-    el("div", { class: "page-title", text: summary.run_id }),
+    el("div", { class: "page-title", text: summary.started_at.slice(0, 10) }),
     el("div", { class: "page-sub" }, [
       instant(summary.started_at),
       el("span", { text: " → " }),

@@ -92,6 +92,56 @@ def openrouter_configuration(value: Optional[str]) -> Dict[str, str]:
     }
 
 
+def _channel_names(path: Optional[Path], raw: str) -> Dict[str, str]:
+    """Parse the optional ``channel_id = display name`` map.
+
+    Entries are separated by newlines or commas, and each one splits on its
+    first ``=`` or ``:`` so a display name may contain spaces. A leading ``#`` is
+    dropped: people write channels the way Slack shows them.
+
+    A name here is **display only**. Notes are still stored under the channel ID
+    (``slack.py:376``) and a saved project scope still selects by ID, so a name
+    changes what a reader sees and nothing about what a scope matches. That is
+    also why an ID absent from ``channel_ids`` is accepted rather than rejected:
+    the corpus keeps notes from channels no longer being collected, and those
+    deserve names as much as the live ones do.
+    """
+    names: Dict[str, str] = {}
+    for entry in re.split(r"[\n,]+", raw.strip()):
+        entry = entry.strip()
+        if not entry:
+            continue
+        match = re.match(r"^([^=:]+)[=:](.*)$", entry)
+        if not match:
+            raise ConfigurationError(
+                "configuration file %s has a Slack channel name entry that is "
+                "not 'CHANNEL_ID = name': %s" % (path, entry)
+            )
+        channel_id = match.group(1).strip()
+        name = match.group(2).strip().lstrip("#").strip()
+        if not re.fullmatch(r"[CDG][A-Z0-9]+", channel_id):
+            raise ConfigurationError(
+                "configuration file %s has invalid Slack channel ID: %s"
+                % (path, channel_id)
+            )
+        if not name:
+            raise ConfigurationError(
+                "configuration file %s has an empty Slack channel name for %s"
+                % (path, channel_id)
+            )
+        existing = names.get(channel_id)
+        # Two names for one channel is a config bug with a silent consequence:
+        # whichever the parser happened to keep would label every row and every
+        # scope receipt for that channel.
+        if existing is not None and existing != name:
+            raise ConfigurationError(
+                "configuration file %s gives Slack channel %s two names: %s and %s"
+                % (path, channel_id, existing, name)
+            )
+        names[channel_id] = name
+    return names
+
+
 def slack_configuration(value: Optional[str]) -> Dict[str, Any]:
     """Load Slack source settings from the shared INI file.
 
@@ -101,7 +151,7 @@ def slack_configuration(value: Optional[str]) -> Dict[str, Any]:
     """
     path, parser = _parser(value)
     if not parser.has_section("slack"):
-        return {"channel_ids": [], "excluded_user_ids": []}
+        return {"channel_ids": [], "excluded_user_ids": [], "channel_names": {}}
 
     raw_channels = parser.get("slack", "channel_ids", fallback="")
     channel_ids = []
@@ -130,6 +180,9 @@ def slack_configuration(value: Optional[str]) -> Dict[str, Any]:
     return {
         "channel_ids": channel_ids,
         "excluded_user_ids": excluded_user_ids,
+        "channel_names": _channel_names(
+            path, parser.get("slack", "channel_names", fallback="")
+        ),
         "bot_token": parser.get("slack", "bot_token", fallback="").strip(),
     }
 

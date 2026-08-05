@@ -256,6 +256,11 @@ shown or accepted as an answer citation. Related objects and pending review
 items are also constrained to matching sources. An empty scope stays empty and
 `ask` returns an insufficient-evidence answer without calling the model.
 
+The Ask tab of `meeting-memory ui` reads and writes the same files: its scope
+selector lists these projects, and its editor builds one from the sources the
+index actually cites, which is the easier way to assemble a project the first
+time. `project create` remains the way to script one.
+
 Recency scoring is relative to the newest confirmation inside the project, so
 scores from different projects are not directly comparable. Loading still
 validates evidence for the whole repository before applying the project filter;

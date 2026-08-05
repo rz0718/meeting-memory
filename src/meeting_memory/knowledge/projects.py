@@ -5,9 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
-from .consumption import SearchDocument, normalize_display, normalize_phrase
+from .consumption import (
+    SearchDocument,
+    load_documents,
+    normalize_display,
+    normalize_phrase,
+)
 from .errors import SchemaError
 from .repository import KnowledgeRepository
 from .util import atomic_write, json_bytes, slugify
@@ -132,6 +137,29 @@ def scope_documents(
         if evidence:
             result.append(replace(document, evidence=evidence))
     return tuple(result)
+
+
+def scoped_documents(
+    repository: KnowledgeRepository,
+    project_name: Optional[str],
+    documents: Optional[Sequence[SearchDocument]] = None,
+) -> Tuple[Tuple[SearchDocument, ...], Optional[ProjectScope]]:
+    """Load the corpus, then narrow it to one saved scope.
+
+    Every caller that offers ``--project`` -- the CLI's read commands and the
+    UI's Ask routes alike -- resolves a scope here, so a project means the same
+    set of documents whichever surface asked. A caller that already holds the
+    unscoped corpus (the UI needs it to report what the scope excluded) may pass
+    it in rather than reading it twice.
+    """
+    # Keep loading ahead of filtering: scoped reads intentionally retain the
+    # repository-wide evidence validation behavior of existing read commands.
+    if documents is None:
+        documents = load_documents(repository)
+    if project_name is None:
+        return tuple(documents), None
+    scope = load_project(repository, project_name)
+    return scope_documents(scope, documents), scope
 
 
 def projects_directory(repository: KnowledgeRepository) -> Path:

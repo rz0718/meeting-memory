@@ -30,7 +30,9 @@ def _date(value: Optional[dt.date]) -> Optional[str]:
 
 
 def _object_payload(
-    repository: KnowledgeRepository, item: SelectedDocument
+    repository: KnowledgeRepository,
+    item: SelectedDocument,
+    evidence_totals: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """One retrieved object, described exactly as the packet rendered it.
 
@@ -38,9 +40,20 @@ def _object_payload(
     reached the model -- while ``evidence_total`` reports how many the object
     holds, so a budget-trimmed object cannot be mistaken for a thinly evidenced
     one.
+
+    Under a project scope ``evidence_total`` is already the pruned count, so
+    ``evidence_all_sources`` carries the unpruned one. An object may cite
+    evidence from inside and outside the scope, and the difference is what the
+    UI badges: the scope bounds what can be retrieved and inspected, not the
+    provenance of every clause in a statement synthesized from all of it.
     """
     document: SearchDocument = item.document
+    all_sources = (evidence_totals or {}).get(document.id)
     return {
+        "evidence_all_sources": all_sources,
+        "evidence_out_of_scope": (
+            None if all_sources is None else all_sources - len(document.evidence)
+        ),
         "id": document.id,
         "title": document.title,
         "category": document.category,
@@ -86,17 +99,25 @@ def context_payload(
     repository: KnowledgeRepository,
     packet: ContextPacket,
     options: Dict[str, Any],
+    scope: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Everything that was retrieved, plus the exact bytes sent to the model.
 
     ``packet_sha256`` lets the client tell whether the context it displayed
     after retrieval is the context the answer was actually produced from; the
     two calls are separate, and the repository can change between them.
+
+    ``scope`` is the project receipt, or ``None`` for an unscoped read. It is
+    part of the payload rather than a UI-side annotation because a scoped answer
+    and an unscoped one are otherwise indistinguishable, and reading a
+    narrow-scope answer as a global one is worse than having no answer.
     """
     markdown = packet.markdown
+    evidence_totals = (scope or {}).get("evidence_totals")
     return {
         "query": packet.query,
         "options": dict(options),
+        "scope": scope,
         "retrieval": {
             "objects_selected": len(packet.selected),
             "categories": len({item.document.category for item in packet.selected}),
@@ -105,7 +126,10 @@ def context_payload(
             "chars": len(markdown),
             "max_chars": options.get("max_chars"),
         },
-        "objects": [_object_payload(repository, item) for item in packet.selected],
+        "objects": [
+            _object_payload(repository, item, evidence_totals)
+            for item in packet.selected
+        ],
         "reviews": [_review_payload(item) for item in packet.reviews],
         "omissions": list(packet.omissions),
         "markdown": markdown,
@@ -189,6 +213,7 @@ def render_saved_answer(result: Dict[str, Any]) -> str:
         "",
         answer["question"],
         "",
+        *_scope_lines(context.get("scope"), context.get("options") or {}),
         "# Answer",
         "",
         answer["answer"],
@@ -237,6 +262,49 @@ def render_saved_answer(result: Dict[str, Any]) -> str:
     lines.extend(["", "## Context omissions", ""])
     lines.extend(_bullets(context["omissions"]))
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _scope_lines(
+    scope: Optional[Dict[str, Any]], options: Dict[str, Any]
+) -> List[str]:
+    """State the scope the answer ran under, high in the file.
+
+    An unscoped answer says so explicitly. Silence would leave a reader to
+    assume whichever reading suits them, and the two answers are not
+    interchangeable.
+    """
+    if not scope:
+        return [
+            "# Scope",
+            "",
+            "All durable knowledge (no project scope).",
+            "",
+        ]
+    lines = [
+        "# Scope",
+        "",
+        "- Project: %s" % scope["name"],
+        "- Meetings: %s" % (", ".join(scope["meeting_names"]) or "none"),
+        "- Slack: %s" % (", ".join(scope["slack_names"]) or "none"),
+        "- Sources in scope: %d of %d"
+        % (scope["sources_matched"], scope["sources_total"]),
+        "- Knowledge objects in scope: %d of %d"
+        % (scope["objects"], scope["objects_total"]),
+        "- Pending review items: %s"
+        % (
+            "filtered to the same sources"
+            if options.get("include_review_items")
+            else "excluded from this question"
+        ),
+    ]
+    if scope["straddling"]:
+        lines.append(
+            "- Objects citing evidence outside the scope: %d "
+            "(only in-scope evidence was retrieved; the statements themselves "
+            "were synthesized from all of it)" % len(scope["straddling"])
+        )
+    lines.append("")
+    return lines
 
 
 def _bullets(values: Sequence[str], code: bool = False) -> List[str]:

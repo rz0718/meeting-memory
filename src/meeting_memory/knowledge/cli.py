@@ -63,10 +63,9 @@ from .presentation import (
 )
 from .projects import (
     ProjectScope,
-    load_project,
     load_projects,
     save_project,
-    scope_documents,
+    scoped_documents,
 )
 from .repository import KnowledgeRepository
 from .review import (
@@ -739,16 +738,6 @@ def _slack_token(configured: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def _project_documents(repository: KnowledgeRepository, project_name: Optional[str]):
-    # Keep loading ahead of filtering: scoped reads intentionally retain the
-    # repository-wide evidence validation behavior of existing read commands.
-    documents = load_documents(repository)
-    if project_name is None:
-        return documents, None
-    scope = load_project(repository, project_name)
-    return scope_documents(scope, documents), scope
-
-
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -1335,7 +1324,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.command == "search":
-            documents, _ = _project_documents(repository, args.project)
+            documents, _ = scoped_documents(repository, args.project)
             filters = SearchFilters(
                 category=args.category,
                 status=args.status,
@@ -1380,7 +1369,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.command == "context":
-            documents, scope = _project_documents(repository, args.project)
+            documents, scope = scoped_documents(repository, args.project)
             packet = build_context_packet(
                 repository,
                 documents,
@@ -1402,7 +1391,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.command == "ask":
-            documents, scope = _project_documents(repository, args.project)
+            documents, scope = scoped_documents(repository, args.project)
             packet = build_context_packet(
                 repository,
                 documents,

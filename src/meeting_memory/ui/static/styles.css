@@ -1496,6 +1496,151 @@ pre.preview {
   align-items: center;
 }
 
+/* Project scopes.
+ *
+ * The receipt sits above the answer rather than beside it: a scope is a claim
+ * about what was searched, and it has to be read before the answer, not found
+ * afterwards. */
+.ask__scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-top: 10px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-card);
+  background: var(--tint-info);
+  font-size: 13px;
+  color: var(--ink-secondary);
+}
+
+.ask__scope-name {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.ask__scope .row__open {
+  margin-left: auto;
+}
+
+.ask__straddle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.chip__action {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0 0 0 2px;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.chip__action:hover {
+  color: var(--ink);
+}
+
+.cite__remove {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.cite__remove:hover {
+  color: var(--status-critical);
+}
+
+.scope-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.scope-editor__name input,
+.scope-editor__typed input,
+.scope-editor__typed select {
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 5px 8px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.scope-editor__name input {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.scope-editor__typed {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.scope-editor__typed input {
+  flex: 1;
+  min-width: 0;
+}
+
+.scope-sources {
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-card);
+  padding: 4px 0;
+}
+
+.scope-sources__date {
+  position: sticky;
+  top: 0;
+  padding: 6px 12px 4px;
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.scope-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.scope-source:hover {
+  background: var(--hover);
+}
+
+/* Matched, however it got there: clicked directly, or pulled in by another
+ * selector matching its name. The badge in the row says which. */
+.scope-source.is-matched {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.scope-source__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;

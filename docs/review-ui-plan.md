@@ -284,7 +284,9 @@ anchored, and only the presentation is losing it.
 | `POST /api/ask/context` | `build_context_packet()` → `context_payload()` (`ui/ask_payloads.py`) |
 | `POST /api/ask/answer` | the same packet, then `answerer().answer(packet)` → `with_citations()` |
 | `POST /api/ask/save` | `render_saved_answer()` over an answer already recorded this session |
-| `GET /api/ask/scopes`, `POST /api/ask/scopes` | project scope definitions ([§4.4](#44-project-scoped-qa)) — not built |
+| `GET /api/projects` | `load_projects()` plus the observed source universe ([§4.4](#44-project-scoped-qa)) |
+| `POST /api/projects/preview` | `resolve_scope()` — what a selection admits, without saving it |
+| `POST /api/projects` | `save_project()`, the same call `project create` makes |
 
 **Retrieval and answering are split into two calls on purpose.** Retrieval is
 deterministic and fast; the model call takes seconds and has a 120s timeout
@@ -319,13 +321,20 @@ project, unrelated objects compete for the character budget and the answer mixes
 contexts. A **project scope** bounds retrieval to the meetings and Slack channels
 that belong to that project.
 
-**A project is a saved scope, not a new knowledge type.** It holds a name, a set
-of source selectors (date ranges, meeting-file paths, Slack channel IDs), and
-optional category/owner/status filters. Stored one JSON file per project under
-`.knowledge-state/projects/<slug>.json`. That path is neither canonical
-knowledge nor review state, so writing it directly does not cross the
+**A project is a saved scope, not a new knowledge type.** As built, it holds a
+name and two lists of source selectors: meeting names, matched anywhere in a
+meeting filename once case and punctuation are normalized, and Slack channel
+names, matched exactly. Category, owner, and status filters were considered and
+left out — `search` already has them, and a scope that also filtered by status
+would make "in scope" mean two unrelated things at once. Stored one JSON file
+per project under `.knowledge-state/projects/<slug>.json`. That path is neither
+canonical knowledge nor review state, so writing it directly does not cross the
 [§5](#5-invariants-the-implementation-must-hold) boundary — but the exemption is
 narrow and worth naming rather than assuming.
+
+The UI and the CLI resolve a scope through one function, `scoped_documents`
+(`projects.py`), for the same reason `arguments.py` exists on the write side: a
+project has to mean the same set of documents whichever surface asked.
 
 **Where the filter has to apply — all four places, or the scope leaks:**
 
@@ -340,12 +349,12 @@ narrow and worth naming rather than assuming.
    visible symptom.
 3. **Connected review items.** `connected_reviews` (`context.py:166`) reads
    `repository.load_reviews("pending")` directly, *not* the document sequence,
-   and admits reviews on a text match against the query
-   (`context.py:181-182`) — so an out-of-scope review can enter a scoped packet.
-   Fixing this properly means threading an optional source predicate into
-   `build_context_packet`. **Until that exists, a scope forces
-   `include_review_items=False`** rather than showing material the scope
-   excluded. The UI states this in the scope receipt.
+   and admits reviews on a text match against the query — so an out-of-scope
+   review could enter a scoped packet. **Shipped:** `build_context_packet` takes
+   an optional `source_predicate` and threads it into `connected_reviews`, which
+   drops out-of-scope reviews and prunes the sources of the ones it keeps. A
+   scope therefore no longer has to suppress review items wholesale; the receipt
+   states that they were filtered to the same sources.
 4. **The answer validator.** `_validate_answer` derives its allow-list from
    `packet.selected` (`answers.py:130`), so it tightens automatically. Nothing to
    change; worth an assertion in tests.
@@ -358,24 +367,53 @@ of its evidence, so a scope bounds what is retrieved and what can be inspected �
 not the provenance of every clause in the sentence. A hard guarantee would need
 statement-level provenance the repository does not record ([§7](#7-known-gaps)).
 
-**Every scoped answer carries a scope receipt** — project name, resolved source
-count, objects in scope versus total, and whether review items were suppressed —
+**Every scoped answer carries a scope receipt** — project name, sources and
+objects in scope against the totals, that review items were filtered to the same
+sources, and how many admitted objects also cite evidence outside the scope —
 displayed above the answer and included in any saved output. Without it, a scoped
 answer and an unscoped one are indistinguishable after the fact, and a
-narrow-scope answer read as global is worse than no answer.
+narrow-scope answer read as global is worse than no answer. An unscoped saved
+answer says so in the same place rather than saying nothing, and changing the
+scope discards the displayed result: a receipt from one project above an answer
+from another is the confusion the receipt exists to prevent.
 
 **An empty scope refuses to call the model.** If no object survives the filter,
 the UI shows "no knowledge objects in scope" with the scope definition and an
-edit affordance. **It never falls back to unscoped retrieval.** Silent widening
-is the one failure this feature cannot have.
+edit affordance — distinguishing a scope that admits nothing from one that
+admits objects none of which match the question, since those call for different
+fixes. Leaving the scope is a button the reader presses. **No code path falls
+back to unscoped retrieval.** Silent widening is the one failure this feature
+cannot have.
 
 **Building a scope from what exists, not from typed globs.** The scope editor
 lists the actual source universe — every distinct `evidence_sources` entry across
 the index, grouped by date and by kind (`meetings/<date>/*.md` versus
-`meetings/<date>/slack-<channel>.md`, `slack.py:376`) — with Slack channel IDs
-resolved to names where configuration provides them. Selecting sources updates a
-live count: `42 sources → 17 knowledge objects → est. 12k chars`. A project
-assembled from observed sources cannot reference a file that does not exist.
+`meetings/<date>/slack-<channel>.md`, `slack.py:376`). A project assembled from
+observed sources cannot reference a file that does not exist. Sources backing no
+object are omitted: they could only ever resolve to an empty scope.
+
+Selecting a meeting note contributes its filename stem; selecting a Slack note
+contributes its channel ID. Those are the two selector kinds `ProjectScope`
+holds, and the mapping is exact, so the editor can work in sources while the
+saved scope works in names.
+
+The live count reports `sources matched of total → objects of total → evidence
+items`, and *not* an estimated character budget: packet size depends on the
+question, and a number invented before there is one would be the kind of
+fabricated precision this repository avoids. Two things ride alongside the
+count, because a selection is not always what it looks like:
+
+- **Fuzzy expansion.** Meeting selectors match by substring, so a selection can
+  admit sources nobody clicked. Each admitted source reports which selector let
+  it in, rows matched indirectly render as a half-state rather than an unticked
+  box beside a highlighted row, and the count says how many arrived that way.
+- **Selectors matching nothing.** Not an error — a project may be written before
+  the meeting it names happens — but silent otherwise, and a scope narrower than
+  its author believes is exactly this feature's failure mode.
+
+Slack channel IDs are shown as IDs. The collector records no channel name
+(`slack.py:333`) and configuration supplies none, so resolving them to names
+would mean inventing a mapping the repository does not have.
 
 Scopes also apply to Tab 1 and Tab 2 as a filter once they exist, but that is a
 follow-on; Ask is where the concept pays for itself.
@@ -395,8 +433,10 @@ These follow from the existing code and are what a UI most easily erodes:
    `keep-existing`.
 7. All writes hold the repository mutation lock; long LLM calls
    (`review suggest`, `ask`) happen outside it, as they do today.
-8. The Ask tab is a read path. Its only write is an explicit "save answer",
-   through `_answer_output_path`'s protected-directory guard.
+8. The Ask tab is a read path. Its only writes are an explicit "save answer",
+   through `_answer_output_path`'s protected-directory guard, and saving a
+   project scope under `.knowledge-state/projects/` — neither of which is
+   canonical knowledge or review state.
 9. A project scope only ever narrows the candidate set. No code path may widen
    it, and no scoped request may fall back to unscoped retrieval — an empty
    scope is an error state, not a reason to search everything.
@@ -414,13 +454,14 @@ These follow from the existing code and are what a UI most easily erodes:
 | 4 | Blocked-state handling: refresh flow, stale-evidence override, duplicate linking, batch suggestion generation. |
 | 5 | Tab 1 actions: merge, removal basket. |
 | 6 | **Shipped.** Tab 3 read path: question → packet → answer, citation drill-down to evidence excerpts, considered-but-not-cited, omissions callout, raw-packet toggle, save-by-token. |
-| 7 | Project scopes: scope editor over the observed source universe, scoped retrieval, scope receipt, empty-scope refusal, review-item suppression. |
-| 8 | Scope predicate threaded into `build_context_packet` so scoped packets can include review items honestly; scopes reused as a filter on Tabs 1 and 2. |
+| 7 | **Shipped.** Project scopes: scope editor over the observed source universe, scoped retrieval, scope receipt, empty-scope refusal, in-scope review items. |
+| 8 | Scopes reused as a filter on Tabs 1 and 2. (The source predicate this phase was also to carry landed with phase 7, so scoped packets already include review items honestly.) |
 
 Phases 1–3 are the usable product; 4–5 remove the remaining reasons to drop back
 to the CLI. Phase 6 is independently shippable — it depends on nothing in 1–5
 beyond the shared evidence renderer — and can be pulled forward if grounded
-answers matter more than queue throughput.
+answers matter more than queue throughput. Phase 7 is a filter over phase 6's
+retrieval plus an editor over the source universe; it changes no write path.
 
 **Testing.** The backend is thin enough to test at the route level against a
 temporary repository, asserting that each route calls the resolver with the exact

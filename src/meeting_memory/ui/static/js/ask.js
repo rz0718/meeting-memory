@@ -15,19 +15,26 @@ import { api } from "./api.js";
 import { badge, callout, el, icon, mount, property, statusCue } from "./dom.js";
 import { evidenceBlock } from "./evidence.js";
 import { openObjectPeek } from "./objects.js";
+import { openScopeEditor } from "./projects.js";
 import { openReviewPeek } from "./reviewpeek.js";
 import { store } from "./store.js";
 import { busy, empty, reportError, toast } from "./ui.js";
 
 const state = {
   query: "",
+  // The saved project scope this tab is asking under, or null for all durable
+  // knowledge. A scope only ever narrows: nothing here falls back to unscoped
+  // retrieval when it comes back empty.
+  project: null,
+  projects: [],
+  projectsLoaded: false,
   options: {
     limit: 8,
     max_chars: 30000,
     max_evidence_per_object: 3,
     include_review_items: true,
     include_manual_notes: false,
-    include_evidence_excerpts: false,
+    include_evidence_excerpts: true,
   },
   context: null,
   result: null,
@@ -49,10 +56,36 @@ export const askView = {
   },
 
   async render(ctx) {
+    if (!state.projectsLoaded) await loadProjects();
     mount(ctx.filters, filterBar(ctx));
     mount(ctx.content, page(ctx));
   },
 };
+
+async function loadProjects() {
+  try {
+    state.projects = (await api.projects()).projects;
+    state.projectsLoaded = true;
+  } catch (error) {
+    reportError(error);
+  }
+}
+
+function currentProject() {
+  return state.projects.find((value) => value.name === state.project) || null;
+}
+
+// A result carries the scope it ran under. Changing the scope therefore
+// discards it: a receipt from one project above an answer from another is the
+// exact confusion the receipt exists to prevent.
+function setProject(name, ctx) {
+  state.project = name;
+  state.context = null;
+  state.result = null;
+  state.retrievedSha = null;
+  state.phase = "idle";
+  rerender(ctx);
+}
 
 function rerender(ctx) {
   askView.render(ctx);
@@ -95,8 +128,59 @@ function toggleChip(label, key, ctx, title) {
   );
 }
 
+// The scope control: a picker over saved projects, plus the two ways to change
+// one. "New" and "Edit" are buttons rather than options inside the picker --
+// a sentinel option value would collide with a project that happened to be
+// named the same thing.
+function scopeChip(ctx) {
+  const editing = (project) => ({
+    project,
+    onSaved: async (saved) => {
+      await loadProjects();
+      setProject(saved.name, ctx);
+    },
+  });
+  const select = el(
+    "select",
+    {
+      title:
+        "Bound retrieval to one project's meetings and Slack channels. A "
+        + "scope only narrows; it never falls back to searching everything.",
+      onChange: (event) => setProject(event.target.value || null, ctx),
+    },
+    [
+      el("option", { value: "", text: "All knowledge", selected: !state.project }),
+      ...state.projects.map((value) =>
+        el("option", {
+          value: value.name,
+          text: `${value.name} · ${value.objects} objects`,
+          selected: value.name === state.project,
+        })
+      ),
+    ]
+  );
+  const project = currentProject();
+  return el("span", { class: "chip" }, [
+    el("span", { class: "chip__label", text: "Scope" }),
+    select,
+    project
+      ? el("button", {
+          class: "chip__action",
+          title: `Edit the sources in ${project.name}`,
+          onClick: () => openScopeEditor(editing(project)),
+        }, [icon("panel")])
+      : null,
+    el("button", {
+      class: "chip__action",
+      title: "Build a new project scope from the sources the index cites",
+      onClick: () => openScopeEditor(editing(null)),
+    }, [icon("plus")]),
+  ]);
+}
+
 function filterBar(ctx) {
   return [
+    scopeChip(ctx),
     numberChip("Objects", "limit", ctx, {
       min: 1,
       title: "Maximum knowledge objects selected into the context packet.",
@@ -123,11 +207,14 @@ function filterBar(ctx) {
       "Include human-authored manual notes in the context."
     ),
     toggleChip(
-      "Excerpts in context",
+      "Send excerpts to model",
       "include_evidence_excerpts",
       ctx,
-      "Inline the evidence excerpts into the packet the model reads. This UI "
-        + "always shows excerpts; this controls whether the model saw them."
+      "The source lines behind each evidence reference are listed below either "
+        + "way. This controls whether they are also written into the packet the "
+        + "model reads. Off, the model sees only the statements, so detail the "
+        + "statement paraphrased away — links, identifiers, exact numbers — "
+        + "reaches you but not the model."
     ),
   ];
 }
@@ -135,7 +222,7 @@ function filterBar(ctx) {
 // -- asking -----------------------------------------------------------------
 
 function requestBody() {
-  return { query: state.query, ...state.options };
+  return { query: state.query, project: state.project, ...state.options };
 }
 
 async function retrieveOnly(ctx) {
@@ -249,10 +336,64 @@ function page(ctx) {
             + "OPENROUTER_MODEL, or ask_model. Retrieval still works without one.",
         ),
     state.phase === "retrieving" ? busy("Retrieving durable knowledge…") : null,
+    state.context ? scopeReceipt(ctx) : null,
     state.context ? retrievalReceipt() : null,
     state.context ? body(ctx) : state.phase === "idle" && !state.error
       ? empty("Answers are grounded in the durable knowledge this repository holds.")
       : null,
+  ]);
+}
+
+// Without this line a scoped answer and an unscoped one look identical, and a
+// narrow-scope answer read as a global one is worse than no answer.
+function scopeReceipt(ctx) {
+  const scope = state.context.scope;
+  if (!scope) return null;
+  return el("div", { class: "ask__scope" }, [
+    icon("layers"),
+    el("span", { class: "ask__scope-name", text: scope.name }),
+    el("span", {
+      text: `${scope.objects} of ${scope.objects_total} objects · `
+        + `${scope.sources_matched} of ${scope.sources_total} sources`,
+    }),
+    el("span", {
+      class: "muted",
+      // The options this context was retrieved with, not the ones the filter
+      // bar currently shows — those may have moved since.
+      title: state.context.options.include_review_items
+        ? "Pending review items are filtered by the same sources, so a scoped "
+          + "packet carries only in-scope proposals."
+        : "Pending review items are switched off for this question entirely.",
+      text: state.context.options.include_review_items
+        ? "review items scoped"
+        : "review items off",
+    }),
+    scope.straddling.length
+      ? el("span", {
+          class: "status status--warning",
+          title:
+            "These objects also cite evidence outside the scope. Only in-scope "
+            + "evidence was retrieved, but each statement was synthesized from "
+            + "all of it — a scope bounds retrieval, not provenance.",
+          text:
+            scope.straddling.length === 1
+              ? "1 object cites evidence outside the scope"
+              : `${scope.straddling.length} objects cite evidence outside the scope`,
+        })
+      : null,
+    el("button", {
+      class: "row__open",
+      style: "opacity:1",
+      text: "Edit",
+      onClick: () =>
+        openScopeEditor({
+          project: currentProject(),
+          onSaved: async (saved) => {
+            await loadProjects();
+            setProject(saved.name, ctx);
+          },
+        }),
+    }),
   ]);
 }
 
@@ -275,13 +416,15 @@ function retrievalReceipt() {
 function body(ctx) {
   if (!state.context.objects.length) {
     return el("div", {}, [
-      callout(
-        "neutral",
-        "No durable knowledge covers this question",
-        "Deterministic retrieval selected no objects, so no provider was "
-          + "called. Try different wording, or widen the object limit.",
-        "search"
-      ),
+      state.context.scope
+        ? emptyScopeCallout(ctx)
+        : callout(
+            "neutral",
+            "No durable knowledge covers this question",
+            "Deterministic retrieval selected no objects, so no provider was "
+              + "called. Try different wording, or widen the object limit.",
+            "search"
+          ),
       omissionsBlock(),
       contextBlock(),
     ]);
@@ -304,6 +447,63 @@ function body(ctx) {
       ...railCards(),
     ]),
   ]);
+}
+
+// An empty scope is an error state, not a reason to search everything. Leaving
+// it is an explicit act by the reader, and it says so.
+function emptyScopeCallout(ctx) {
+  const scope = state.context.scope;
+  const scopeIsEmpty = scope.objects === 0;
+  return callout(
+    scopeIsEmpty ? "warning" : "neutral",
+    scopeIsEmpty
+      ? `No knowledge objects are in scope for “${scope.name}”`
+      : `Nothing in “${scope.name}” answers this question`,
+    el("div", {}, [
+      el("div", {
+        text: scopeIsEmpty
+          ? `This project matches ${scope.sources_matched} of `
+            + `${scope.sources_total} sources and admits none of the `
+            + `${scope.objects_total} knowledge objects. No provider was called.`
+          : `The project admits ${scope.objects} of ${scope.objects_total} `
+            + "knowledge objects, and deterministic retrieval selected none of "
+            + "them for this question. No provider was called.",
+      }),
+      el("div", { class: "props props--tight", style: "margin-top:8px" }, [
+        ...property("Meetings", scope.meeting_names.join(", ") || null),
+        ...property("Slack", scope.slack_names.join(", ") || null),
+      ]),
+      el("div", { class: "actionbar" }, [
+        el(
+          "button",
+          {
+            class: "btn",
+            onClick: () =>
+              openScopeEditor({
+                project: currentProject(),
+                onSaved: async (saved) => {
+                  await loadProjects();
+                  setProject(saved.name, ctx);
+                },
+              }),
+          },
+          [icon("panel"), el("span", { text: "Edit this scope" })]
+        ),
+        el(
+          "button",
+          {
+            class: "btn",
+            title:
+              "Leave the scope deliberately. Nothing here widens a scope on "
+              + "your behalf.",
+            onClick: () => setProject(null, ctx),
+          },
+          [icon("search"), el("span", { text: "Ask across all knowledge" })]
+        ),
+      ]),
+    ]),
+    "layers"
+  );
 }
 
 // -- answer -----------------------------------------------------------------
@@ -496,6 +696,22 @@ function objectCard(object) {
             text:
               `${object.evidence_in_context} of ${object.evidence_total} `
               + "evidence items were in the context the model read.",
+          }),
+        ])
+      : null,
+    // The scope pruned this object's out-of-scope evidence, but its statement
+    // was written from all of it. Saying so is the honest limit of a scope.
+    object.evidence_out_of_scope
+      ? el("div", { class: "secondary ask__straddle" }, [
+          statusCue(
+            "warning",
+            `${object.evidence_total} of ${object.evidence_all_sources} `
+              + "evidence items in scope"
+          ),
+          el("span", {
+            class: "muted",
+            style: "font-size:12px",
+            text: "statement synthesized from all of it",
           }),
         ])
       : null,

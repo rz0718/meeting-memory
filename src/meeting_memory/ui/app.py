@@ -31,7 +31,13 @@ from ..knowledge.errors import (
 )
 from ..knowledge.presentation import ObjectNotFoundError
 from ..knowledge.repository import KnowledgeRepository
-from . import routes_actions, routes_ask, routes_reviews, routes_runs
+from . import (
+    routes_actions,
+    routes_ask,
+    routes_projects,
+    routes_reviews,
+    routes_runs,
+)
 from .service import UiService
 
 
@@ -107,6 +113,7 @@ def create_app(
     app.include_router(routes_reviews.router)
     app.include_router(routes_actions.router)
     app.include_router(routes_ask.router)
+    app.include_router(routes_projects.router)
 
     if STATIC_DIR.is_dir():
         app.mount(

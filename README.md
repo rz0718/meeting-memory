@@ -488,9 +488,10 @@ candidate evidence.
 
 ## Local review UI
 
-`meeting-memory ui` serves a two-tab web UI on `127.0.0.1:8787` for the morning
-routine: see what last night's run inserted, then work the review queue with AI
-suggestions a human can modify and decide.
+`meeting-memory ui` serves a three-tab web UI on `127.0.0.1:8787` for the morning
+routine: see what last night's run inserted, work the review queue with AI
+suggestions a human can modify and decide, then ask the knowledge questions and
+read the answer next to the evidence it rests on.
 
 ```bash
 python3 -m pip install -e '.[ui]'
@@ -519,6 +520,32 @@ touching any radio or field sends the same `--suggestion-id` as an explicit
 override and is recorded as `overridden`. A badge states which one the audit
 trail will say before you apply.
 
+**Ask** is `meeting-memory ask` with its citations turned back into evidence.
+Retrieval and answering are two calls, so the objects, excerpts, and omissions
+render before the model responds — a slow or unconfigured model still leaves you
+the evidence, and `Retrieve only` skips the provider entirely. Under the answer
+sit the things the CLI never prints: the objects that were retrieved and *not*
+cited, the material the character budget dropped, and the exact packet the model
+read. Saving writes the answer you looked at, replayed from the session record
+rather than re-sampled, to `outputs/Knowledge-Answers/`.
+
+**Project scopes** bound a question to one project's meetings and Slack
+channels. The `Scope` control lists saved projects — the same files
+`meeting-memory project create` writes — and its editor is built from the source
+universe the index actually cites, so a project cannot name a file that does not
+exist. Ticking a meeting note contributes its filename stem; ticking a Slack note
+contributes its channel ID. Meeting selectors match by substring, so the editor
+reports how many sources arrived through a name match rather than a click, and
+flags any selector matching nothing at all.
+
+A scoped answer carries its receipt — project, objects and sources in scope
+against the totals, and the objects that also cite evidence outside it. That
+last one is the honest limit: a scope bounds what is retrieved and inspectable,
+but a statement was synthesized from all of its evidence, so provenance is not
+scoped with it. A scope only ever narrows. When nothing is in scope, the tab
+says so with the scope definition and stops; leaving the scope is a button you
+press, never a fallback the code takes for you.
+
 Every write goes through `ReviewResolver`, `ReviewRefresher`, `KnowledgeMerger`,
 or `KnowledgeRemover` — the same objects the CLI wraps — and every write is
 gated on a dry run whose preview you have seen. The server refuses an apply
@@ -531,8 +558,10 @@ drifted resolutions by design and there is no override. Drifted candidate
 evidence shows an `Allow stale evidence` checkbox only for the four
 evidence-promoting actions, with the override recorded permanently.
 
-Keyboard: `1`/`2` switch tabs, `j`/`k` move through the queue, `a` accepts and
+Keyboard: `1`/`2`/`3` switch tabs, `j`/`k` move through the queue, `a` accepts and
 previews, `o` focuses the action radios, `d` defers, `Enter` applies from an
 open preview, and `⌘K` / `Ctrl+K` jumps to a review or object by ID or title.
 
-Raw meeting and Slack notes are never editable or writable from the UI.
+Raw meeting and Slack notes are never editable or writable from the UI. Ask is a
+read path; its only writes are the explicit "save answer" and saving a project
+scope, and neither touches `knowledge/` or `knowledge-review/`.

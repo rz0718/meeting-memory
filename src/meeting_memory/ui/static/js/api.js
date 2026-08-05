@@ -65,10 +65,9 @@ export const api = {
   askSave: (answerToken) =>
     request("POST", "/api/ask/save", { answer_token: answerToken }),
 
-  askContext: (body) => request("POST", "/api/ask/context", body),
-  askAnswer: (body) => request("POST", "/api/ask/answer", body),
-  askSave: (answerToken) =>
-    request("POST", "/api/ask/save", { answer_token: answerToken }),
+  projects: () => request("GET", "/api/projects"),
+  projectPreview: (body) => request("POST", "/api/projects/preview", body),
+  projectSave: (body) => request("POST", "/api/projects", body),
 
   merge: (body) => request("POST", "/api/merge", body),
 

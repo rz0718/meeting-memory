@@ -9,7 +9,7 @@ assert against.
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,7 @@ from ..knowledge.constants import (
     REVIEW_ACTIONS,
     STATUSES,
 )
+from ..knowledge.projects import ProjectScope
 
 
 def _iso_date(value: Optional[str], label: str) -> Optional[str]:
@@ -198,21 +199,67 @@ class SuggestRequest(BaseModel):
         }
 
 
+class ProjectRequest(BaseModel):
+    """The scope editor form, one field per ``project create`` flag.
+
+    ``name`` is optional only so the live preview can resolve a selection the
+    human has not named yet; saving without one fails in ``ProjectScope``,
+    which is the same refusal the CLI's positional argument produces.
+    """
+
+    name: str = ""
+    meeting_names: List[str] = Field(default_factory=list)
+    slack_names: List[str] = Field(default_factory=list)
+    replace: bool = False
+
+
+def project_scope(request: ProjectRequest) -> ProjectScope:
+    """Build the scope ``project create`` would build from the same values.
+
+    Blank entries are dropped rather than rejected: an empty row in the editor
+    and an omitted ``--meeting-name`` have to mean the same thing. Everything
+    else -- normalization, deduplication, the refusal to save a scope with no
+    selectors -- belongs to ``ProjectScope`` and is left there.
+    """
+    meetings = tuple(value for value in request.meeting_names if value.strip())
+    slack = tuple(value for value in request.slack_names if value.strip())
+    if not request.name.strip():
+        raise ValueError("a project needs a name")
+    if not meetings and not slack:
+        raise ValueError(
+            "a project needs at least one meeting name or Slack channel"
+        )
+    return ProjectScope(
+        name=request.name.strip(), meeting_names=meetings, slack_names=slack
+    )
+
+
 class AskRequest(BaseModel):
     """The Ask form, one field per ``ask`` context option.
 
     The bounds match ``cli._positive`` and ``cli._nonnegative`` so a request the
     CLI would reject at parse time is rejected here too, rather than reaching
     ``build_context_packet`` and failing later with a less specific message.
+
+    ``project`` is the saved scope name, exactly as ``ask --project`` takes it.
+    It is not a context-packet keyword: it selects which documents are handed
+    to the builder, so it is applied before the call rather than inside it.
+
+    ``include_evidence_excerpts`` defaults on here but stays off for ``ask``.
+    A statement is a paraphrase, and specifics the extractor left out of it --
+    links, identifiers, exact numbers -- survive only in the source lines. The
+    form shows those lines on screen regardless, so defaulting off meant the
+    reader routinely saw detail the model had not been given.
     """
 
     query: str = Field(min_length=1)
+    project: Optional[str] = None
     limit: int = Field(default=8, ge=1)
     max_chars: int = Field(default=30000, ge=1)
     max_evidence_per_object: int = Field(default=3, ge=0)
     include_review_items: bool = True
     include_manual_notes: bool = False
-    include_evidence_excerpts: bool = False
+    include_evidence_excerpts: bool = True
 
 
 def context_arguments(request: AskRequest) -> Dict[str, Any]:

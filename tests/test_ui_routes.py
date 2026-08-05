@@ -26,6 +26,8 @@ from meeting_memory.knowledge.models import (
     KnowledgeObject,
     ReviewItem,
 )
+from meeting_memory.knowledge.context import build_context_packet
+from meeting_memory.knowledge.projects import ProjectScope, scoped_documents
 from meeting_memory.knowledge.repository import KnowledgeRepository
 from meeting_memory.knowledge.review import ReviewResolver
 from meeting_memory.knowledge.review_ai import FakeReviewAdvisor
@@ -40,9 +42,11 @@ from meeting_memory.ui.app import create_app
 from meeting_memory.ui.arguments import (
     AskRequest,
     MergeRequest,
+    ProjectRequest,
     ResolveRequest,
     context_arguments,
     merge_arguments,
+    project_scope,
     resolver_arguments,
 )
 from meeting_memory.ui.payloads import canonical_drift, review_detail_payload, word_diff
@@ -90,6 +94,16 @@ def cli_context_arguments(argv):
         "include_manual_notes": args.include_manual_notes,
         "include_evidence_excerpts": args.include_evidence_excerpts,
     }
+
+
+def cli_project_scope(argv):
+    """The scope cli.py builds for `project create`, straight from its argv."""
+    args = build_parser().parse_args(argv)
+    return ProjectScope(
+        name=args.name,
+        meeting_names=tuple(args.meeting_names),
+        slack_names=tuple(args.slack_names),
+    )
 
 
 def cli_merge_arguments(argv):
@@ -1440,10 +1454,413 @@ class AskRoutesTest(UiTestCase):
         )
 
 
+class ProjectScopeRoutesTest(UiTestCase):
+    """A project bounds retrieval to one set of meetings and Slack channels.
+
+    The two properties worth asserting are that the scope only ever narrows --
+    no object, related object, or review item may enter from outside it -- and
+    that what it narrowed to is reported, since a scoped answer read as a global
+    one is worse than no answer at all.
+    """
+
+    MODEL = "test/ask"
+
+    def setUp(self):
+        super().setUp()
+        self.answerer = None
+        self.client = TestClient(
+            create_app(
+                self.repository,
+                reviewer="rui",
+                ask_model=self.MODEL,
+                answerer_factory=lambda service: self.answerer,
+            )
+        )
+        self.cci = self.write_source(
+            "2026-07-29", "CCI Weekly.md", "# CCI Weekly\n\nThe framework is live.\n"
+        )
+        self.other = self.write_source(
+            "2026-07-29", "Vendor Weekly.md", "# Vendor Weekly\n\nThe framework waits.\n"
+        )
+        self.slack = self.write_source(
+            "2026-07-29", "slack-c123.md", "# Slack channel C123\n\nFramework shipped.\n"
+        )
+
+    # -- fixtures ----------------------------------------------------------
+
+    def write_source(self, date, filename, body):
+        path = self.repository.meetings_dir / date / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def make_object_on(self, object_id, sources, statement, related=()):
+        obj = KnowledgeObject(
+            id=object_id,
+            title="Framework",
+            category="projects",
+            status="approved",
+            effective_date="2026-07-29",
+            last_confirmed="2026-07-29",
+            owner="Team",
+            confidence="high",
+            created_at="2026-07-29T08:00:00Z",
+            updated_at="2026-07-29T08:00:00Z",
+            evidence=[
+                Evidence(
+                    source=self.repository.source_reference(path),
+                    source_sha256=sha256_file(path),
+                    anchor="framework",
+                    line_start=1,
+                    line_end=1,
+                    observed_at="2026-07-29",
+                )
+                for path in sources
+            ],
+            related_objects=list(related),
+            statement=statement,
+            path=self.repository.knowledge_dir / "projects" / ("%s.md" % object_id),
+        )
+        obj.path.write_bytes(self.repository.render_knowledge(obj))
+        return obj
+
+    def save_scope(self, name="CCI", meetings=("CCI",), slack=()):
+        response = self.client.post(
+            "/api/projects",
+            json={
+                "name": name,
+                "meeting_names": list(meetings),
+                "slack_names": list(slack),
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()
+
+    def ask(self, path="answer", **body):
+        payload = {"query": "framework", "include_review_items": False}
+        payload.update(body)
+        return self.client.post("/api/ask/%s" % path, json=payload).json()
+
+    # -- the source universe -----------------------------------------------
+
+    def test_the_universe_offers_only_sources_the_index_actually_cites(self):
+        """A project assembled from observed sources cannot name a file that
+        does not exist, and a source backing no object could only ever resolve
+        to an empty scope."""
+        self.make_object_on("project-cci", [self.cci], "The CCI framework is live.")
+        self.write_source("2026-07-29", "Unused.md", "# Unused\n\nNothing cites this.\n")
+
+        universe = self.client.get("/api/projects").json()["universe"]
+
+        self.assertEqual(
+            ["meetings/2026-07-29/CCI Weekly.md"],
+            [entry["source"] for entry in universe["sources"]],
+        )
+        entry = universe["sources"][0]
+        self.assertEqual("meeting", entry["kind"])
+        self.assertEqual("2026-07-29", entry["date"])
+        self.assertEqual("CCI Weekly", entry["selector"])
+        self.assertEqual(1, entry["objects"])
+
+    def test_slack_sources_are_offered_by_channel_and_selected_exactly(self):
+        self.make_object_on("project-slack", [self.slack], "The framework shipped.")
+
+        universe = self.client.get("/api/projects").json()["universe"]
+        entry = universe["sources"][0]
+
+        self.assertEqual("slack", entry["kind"])
+        self.assertEqual("c123", entry["selector"])
+        self.assertEqual(1, universe["slack"])
+        resolution = self.client.post(
+            "/api/projects/preview", json={"slack_names": ["c123-ops"]}
+        ).json()
+        self.assertEqual(0, resolution["sources_matched"])
+        self.assertEqual(["c123-ops"], resolution["unmatched_selectors"]["slack_names"])
+
+    def test_preview_reports_sources_a_fuzzy_selector_pulled_in_unclicked(self):
+        """Meeting selectors match by substring, so the sources a selection
+        resolves to are not always the sources that were clicked."""
+        self.make_object_on("project-cci", [self.cci], "The CCI framework is live.")
+        self.make_object_on("project-vendor", [self.other], "The vendor waits.")
+
+        resolution = self.client.post(
+            "/api/projects/preview", json={"meeting_names": ["Weekly"]}
+        ).json()
+
+        self.assertEqual(2, resolution["sources_matched"])
+        self.assertEqual(2, resolution["sources_by_fuzzy_match"])
+        self.assertEqual([False, False], [e["direct"] for e in resolution["sources"]])
+        self.assertEqual(2, resolution["objects"])
+
+        exact = self.client.post(
+            "/api/projects/preview", json={"meeting_names": ["CCI Weekly"]}
+        ).json()
+        self.assertEqual([True], [e["direct"] for e in exact["sources"]])
+        self.assertEqual(0, exact["sources_by_fuzzy_match"])
+
+    def test_an_empty_selection_resolves_to_nothing_rather_than_everything(self):
+        self.make_object_on("project-cci", [self.cci], "The CCI framework is live.")
+
+        resolution = self.client.post("/api/projects/preview", json={}).json()
+
+        self.assertEqual(0, resolution["objects"])
+        self.assertEqual(0, resolution["sources_matched"])
+        self.assertEqual(1, resolution["objects_total"])
+
+    # -- saving --------------------------------------------------------------
+
+    def test_the_editor_and_the_cli_build_the_same_scope(self):
+        body = ProjectRequest(
+            name="CCI", meeting_names=["CCI", ""], slack_names=["C123"]
+        )
+
+        self.assertEqual(cli_project_scope(
+            ["project", "create", "CCI", "--meeting-name", "CCI", "--slack-name", "C123"]
+        ), project_scope(body))
+
+    def test_saving_a_project_writes_the_file_the_cli_writes(self):
+        self.make_object_on("project-cci", [self.cci], "The CCI framework is live.")
+
+        saved = self.save_scope(slack=("C123",))
+
+        self.assertEqual(".knowledge-state/projects/cci.json", saved["path"])
+        stored = json.loads(
+            (self.repository.root / saved["path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(["CCI"], stored["meeting_names"])
+        self.assertEqual(1, saved["resolution"]["objects"])
+        listed = self.client.get("/api/projects").json()["projects"]
+        self.assertEqual(["CCI"], [value["name"] for value in listed])
+        self.assertEqual(1, listed[0]["objects"])
+
+    def test_redefining_a_saved_project_requires_the_replace_flag(self):
+        """A scope that could be silently redefined would change what an
+        already-answered question meant."""
+        self.save_scope()
+
+        clash = self.client.post(
+            "/api/projects", json={"name": "CCI", "meeting_names": ["Vendor"]}
+        )
+        self.assertEqual(400, clash.status_code)
+        self.assertIn("already exists", clash.json()["error"])
+
+        replaced = self.client.post(
+            "/api/projects",
+            json={"name": "CCI", "meeting_names": ["Vendor"], "replace": True},
+        )
+        self.assertEqual(200, replaced.status_code)
+        self.assertEqual(["Vendor"], replaced.json()["project"]["meeting_names"])
+
+    def test_a_project_with_no_selectors_is_refused(self):
+        response = self.client.post("/api/projects", json={"name": "CCI"})
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("at least one", response.json()["error"])
+
+    # -- scoped retrieval ----------------------------------------------------
+
+    def test_retrieval_admits_only_objects_evidenced_inside_the_scope(self):
+        self.make_object_on("project-cci", [self.cci], "The CCI framework is live.")
+        self.make_object_on("project-vendor", [self.other], "The framework waits.")
+        self.save_scope()
+
+        payload = self.ask("context", project="CCI")
+
+        self.assertEqual(
+            ["project-cci"], [value["id"] for value in payload["objects"]]
+        )
+        self.assertEqual("CCI", payload["scope"]["name"])
+        self.assertEqual(1, payload["scope"]["objects"])
+        self.assertEqual(2, payload["scope"]["objects_total"])
+        self.assertEqual(1, payload["scope"]["sources_matched"])
+        self.assertEqual(2, payload["scope"]["sources_total"])
+        self.assertNotIn("vendor", payload["markdown"].lower())
+
+    def test_a_related_object_may_not_enter_the_packet_from_outside_the_scope(self):
+        """One-hop expansion reads the same document sequence, so pre-filtering
+        covers it -- silently, which is why it is asserted."""
+        self.make_object_on(
+            "project-cci",
+            [self.cci],
+            "The CCI framework is live.",
+            related=("project-vendor",),
+        )
+        self.make_object_on("project-vendor", [self.other], "Unrelated wording.")
+        self.save_scope()
+
+        payload = self.ask("context", project="CCI")
+
+        self.assertEqual(
+            ["project-cci"], [value["id"] for value in payload["objects"]]
+        )
+
+    def test_an_out_of_scope_review_item_never_enters_a_scoped_packet(self):
+        obj = self.make_object_on("project-framework", [self.cci], "The framework is live.")
+        self.make_review(existing=obj)
+        self.save_scope()
+
+        unscoped = self.ask("context", include_review_items=True)
+        scoped = self.ask("context", project="CCI", include_review_items=True)
+
+        # The review's evidence is the out-of-scope default source, so it is
+        # connected to the question but not to the project.
+        self.assertEqual(1, unscoped["retrieval"]["reviews_selected"])
+        self.assertEqual(0, scoped["retrieval"]["reviews_selected"])
+        self.assertTrue(scoped["scope"]["review_items_scoped"])
+
+    def test_a_straddling_object_shows_only_its_in_scope_evidence(self):
+        """The scope bounds what is retrieved and inspectable, not the
+        provenance of a statement synthesized from all of an object's
+        evidence -- so the shortfall is reported rather than implied."""
+        self.make_object_on(
+            "project-cci", [self.cci, self.other], "The CCI framework is live."
+        )
+        self.save_scope()
+
+        payload = self.ask("context", project="CCI")
+
+        selected = payload["objects"][0]
+        self.assertEqual(
+            ["meetings/2026-07-29/CCI Weekly.md"],
+            [entry["source"] for entry in selected["evidence"]],
+        )
+        self.assertEqual(1, selected["evidence_total"])
+        self.assertEqual(2, selected["evidence_all_sources"])
+        self.assertEqual(1, selected["evidence_out_of_scope"])
+        self.assertEqual(
+            [{"id": "project-cci", "title": "Framework", "in_scope": 1, "total": 2}],
+            payload["scope"]["straddling"],
+        )
+
+    def test_an_empty_scope_stays_empty_and_never_reaches_a_provider(self):
+        """Silent widening is the one failure this feature cannot have."""
+        self.make_object_on("project-vendor", [self.other], "The framework waits.")
+        self.save_scope()
+        self.answerer = None  # any provider call would raise AttributeError
+
+        payload = self.ask(project="CCI")
+
+        self.assertEqual(0, payload["context"]["retrieval"]["objects_selected"])
+        self.assertEqual(0, payload["context"]["scope"]["objects"])
+        self.assertEqual(1, payload["context"]["scope"]["objects_total"])
+        self.assertIsNone(payload["answer"]["model"])
+        self.assertIn("insufficient", payload["answer"]["answer"].lower())
+
+    def test_an_unknown_project_is_refused_rather_than_ignored(self):
+        self.make_object_on("project-cci", [self.cci], "The CCI framework is live.")
+
+        response = self.client.post(
+            "/api/ask/context", json={"query": "framework", "project": "Ghost"}
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("project scope not found", response.json()["error"])
+
+    def test_the_saved_answer_states_the_scope_it_ran_under(self):
+        self.make_object_on(
+            "project-cci", [self.cci, self.other], "The CCI framework is live."
+        )
+        self.save_scope()
+        self.answerer = FakeAnswerer(
+            KnowledgeAnswer(
+                question="framework",
+                answer="The CCI framework is live.",
+                confidence="high",
+                knowledge_objects_used=("project-cci",),
+                meeting_evidence_used=("meetings/2026-07-29/CCI Weekly.md",),
+                open_conflicts=(),
+                model=self.MODEL,
+            )
+        )
+
+        answered = self.ask(project="CCI")
+        saved = self.client.post(
+            "/api/ask/save", json={"answer_token": answered["answer_token"]}
+        ).json()
+        text = (self.repository.root / saved["saved_path"]).read_text(encoding="utf-8")
+
+        self.assertIn("- Project: CCI", text)
+        # This question ran with review items switched off; the file says which
+        # of the two reasons no proposal appears in it.
+        self.assertIn("- Pending review items: excluded from this question", text)
+        self.assertIn("- Knowledge objects in scope: 1 of 1", text)
+        self.assertIn("- Sources in scope: 1 of 2", text)
+        self.assertIn("outside the scope: 1", text)
+
+    def test_an_unscoped_saved_answer_says_so_explicitly(self):
+        self.make_object_on("project-cci", [self.cci], "The CCI framework is live.")
+        self.answerer = FakeAnswerer(
+            KnowledgeAnswer(
+                question="framework",
+                answer="The CCI framework is live.",
+                confidence="high",
+                knowledge_objects_used=("project-cci",),
+                meeting_evidence_used=("meetings/2026-07-29/CCI Weekly.md",),
+                open_conflicts=(),
+                model=self.MODEL,
+            )
+        )
+
+        answered = self.ask()
+        saved = self.client.post(
+            "/api/ask/save", json={"answer_token": answered["answer_token"]}
+        ).json()
+
+        self.assertIn(
+            "All durable knowledge (no project scope).",
+            (self.repository.root / saved["saved_path"]).read_text(encoding="utf-8"),
+        )
+
+    def test_the_route_and_the_cli_build_the_same_scoped_packet(self):
+        """Byte-identical packets are what keep a scoped answer in the UI and a
+        scoped answer on the command line from being two different things."""
+        self.make_object_on(
+            "project-cci", [self.cci, self.other], "The CCI framework is live."
+        )
+        self.make_object_on("project-vendor", [self.other], "The framework waits.")
+        self.save_scope()
+        # Excerpts are named explicitly because the form defaults them on and
+        # ``ask`` defaults them off. This test is about scoping, so both sides
+        # ask for the same material and the packets differ only if scope does.
+        args = build_parser().parse_args(
+            [
+                "ask",
+                "framework",
+                "--project",
+                "CCI",
+                "--no-review-items",
+                "--include-evidence-excerpts",
+            ]
+        )
+
+        documents, scope = scoped_documents(self.repository, args.project)
+        expected = build_context_packet(
+            self.repository,
+            documents,
+            args.query,
+            limit=args.limit,
+            max_chars=args.max_chars,
+            max_evidence_per_object=args.max_evidence_per_object,
+            include_review_items=args.include_review_items,
+            include_manual_notes=args.include_manual_notes,
+            include_evidence_excerpts=args.include_evidence_excerpts,
+            source_predicate=scope.matches_source,
+        )
+
+        self.assertEqual(expected.markdown, self.ask("context", project="CCI")["markdown"])
+
+
 class StaticAssetTest(UiTestCase):
     def test_index_and_modules_are_served(self):
         self.assertEqual(200, self.client.get("/").status_code)
-        for name in ("styles.css", "js/app.js", "js/queue.js", "js/runs.js", "js/ask.js"):
+        for name in (
+            "styles.css",
+            "js/app.js",
+            "js/queue.js",
+            "js/runs.js",
+            "js/ask.js",
+            "js/projects.js",
+        ):
             self.assertEqual(200, self.client.get("/static/%s" % name).status_code, name)
 
 
