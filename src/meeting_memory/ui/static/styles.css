@@ -477,15 +477,142 @@ h2.section {
   color: var(--ink-muted);
 }
 
-.sparkline {
-  display: block;
-  margin-top: 10px;
+.source-summary {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-card);
+  background: var(--surface-secondary);
 }
 
-.sparkline path {
+.source-summary__counts {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+  color: var(--ink-secondary);
+  font-size: 14px;
+}
+
+.source-summary__counts strong {
+  color: var(--ink);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-summary__separator {
+  color: var(--ink-muted);
+  margin: 0 2px;
+}
+
+.source-summary__note {
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.knowledge-chart {
+  width: 100%;
+  margin: 12px 0 24px;
+  padding: 14px 16px 8px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.knowledge-chart__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.knowledge-chart__title {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.knowledge-chart__subtitle,
+.knowledge-chart__empty {
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.knowledge-chart__empty {
+  padding: 48px 0;
+  text-align: center;
+}
+
+.knowledge-chart__svg {
+  display: block;
+  width: 100%;
+  height: 260px;
+  margin-top: 4px;
+  overflow: visible;
+}
+
+.knowledge-chart__grid {
+  stroke: var(--divider);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.knowledge-chart__area {
+  fill: var(--accent);
+  opacity: 0.08;
+}
+
+.knowledge-chart__line {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 1.5;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.knowledge-chart__point {
+  fill: var(--surface);
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  transition: r var(--motion), stroke-width var(--motion);
+}
+
+.knowledge-chart__point:hover,
+.knowledge-chart__point:focus {
+  r: 6px;
+  stroke-width: 3;
+  outline: none;
+}
+
+.knowledge-chart__axis-label,
+.knowledge-chart__date {
+  fill: var(--ink-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.knowledge-chart__count {
+  fill: var(--ink-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .knowledge-chart {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  .knowledge-chart__header {
+    display: block;
+  }
+
+  .knowledge-chart__date,
+  .knowledge-chart__axis-label {
+    font-size: 10px;
+  }
 }
 
 /* -- status cues (always icon + label + colour) ---------------------------- */

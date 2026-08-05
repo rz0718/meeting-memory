@@ -9,6 +9,7 @@ import { api } from "./api.js";
 import { badge, el, icon, instant, mount, statusCue, timezoneSuffix } from "./dom.js";
 import { openObjectPeek } from "./objects.js";
 import { openReviewPeek } from "./reviewpeek.js";
+import { chartSeries, pointX, yTicks } from "./runs_chart.js";
 import { busy, empty, reportError } from "./ui.js";
 import { emit } from "./store.js";
 
@@ -134,37 +135,212 @@ function statTile(label, value, { role = null, iconName = null, note = null } = 
   ]);
 }
 
-function sparkline(runs) {
-  const values = runs
-    .slice(0, 12)
-    .reverse()
-    .map((run) => run.counts.objects_created);
-  if (values.length < 2) return null;
-  const width = 220;
-  const height = 34;
-  const max = Math.max(...values, 1);
-  const step = width / (values.length - 1);
-  const points = values.map(
-    (value, index) => `${index * step},${height - (value / max) * (height - 4) - 2}`
-  );
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", "sparkline");
-  svg.setAttribute("width", String(width));
-  svg.setAttribute("height", String(height));
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgElement(tag, attributes = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    node.setAttribute(name, String(value));
+  }
+  for (const child of [].concat(children)) node.appendChild(child);
+  return node;
+}
+
+function drawKnowledgeChart(svg, series, width) {
+  const height = 260;
+  const margins = { top: 30, right: 18, bottom: 50, left: 46 };
+  const plotWidth = width - margins.left - margins.right;
+  const plotHeight = height - margins.top - margins.bottom;
+  const plotBottom = margins.top + plotHeight;
+  const ticks = yTicks(series.map((entry) => entry.count));
+  const maximum = ticks[ticks.length - 1];
+  const points = series.map((entry, index) => ({
+    ...entry,
+    x: pointX(index, series.length, margins.left, plotWidth),
+    y: margins.top + (1 - entry.count / maximum) * plotHeight,
+  }));
+
+  svg.replaceChildren();
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", `M${points.join(" L")}`);
-  svg.appendChild(path);
-  return el("div", {}, [
-    svg,
-    el("div", { class: "stat__note", text: "Objects created per run, last 12 runs" }),
+  svg.appendChild(
+    svgElement("title", {}, [
+      document.createTextNode("Knowledge objects created in each of the last 12 runs"),
+    ])
+  );
+
+  for (const tick of ticks) {
+    const y = margins.top + (1 - tick / maximum) * plotHeight;
+    svg.appendChild(
+      svgElement("line", {
+        class: "knowledge-chart__grid",
+        x1: margins.left,
+        x2: width - margins.right,
+        y1: y,
+        y2: y,
+      })
+    );
+    const label = svgElement("text", {
+      class: "knowledge-chart__axis-label",
+      x: margins.left - 10,
+      y: y + 4,
+      "text-anchor": "end",
+    });
+    label.textContent = String(tick);
+    svg.appendChild(label);
+  }
+
+  if (points.length) {
+    const line = points.map((point) => `${point.x},${point.y}`).join(" L");
+    svg.appendChild(
+      svgElement("path", {
+        class: "knowledge-chart__area",
+        d: `M${points[0].x},${plotBottom} L${line} L${points.at(-1).x},${plotBottom} Z`,
+      })
+    );
+    svg.appendChild(
+      svgElement("path", { class: "knowledge-chart__line", d: `M${line}` })
+    );
+  }
+
+  points.forEach((point, index) => {
+    const label = `${point.date}: ${point.count} knowledge object${
+      point.count === 1 ? "" : "s"
+    } created`;
+    const circle = svgElement("circle", {
+      class: "knowledge-chart__point",
+      cx: point.x,
+      cy: point.y,
+      r: 4,
+      tabindex: 0,
+      role: "img",
+      "aria-label": label,
+    });
+    circle.appendChild(svgElement("title", {}, [document.createTextNode(label)]));
+    svg.appendChild(circle);
+
+    const count = svgElement("text", {
+      class: "knowledge-chart__count",
+      x: point.x,
+      y: Math.max(16, point.y - 10),
+      "text-anchor": "middle",
+    });
+    count.textContent = String(point.count);
+    svg.appendChild(count);
+
+    const showDate =
+      width >= 720 ||
+      points.length <= 6 ||
+      index % 2 === 0 ||
+      index === points.length - 1;
+    if (showDate) {
+      const date = svgElement("text", {
+        class: "knowledge-chart__date",
+        x: point.x,
+        y: height - 18,
+        "text-anchor": "middle",
+      });
+      date.textContent = point.dateLabel;
+      svg.appendChild(date);
+    }
+  });
+}
+
+function knowledgeChart(runs) {
+  const series = chartSeries(runs);
+  const body = series.length
+    ? (() => {
+        const svg = svgElement("svg", {
+          class: "knowledge-chart__svg",
+          height: 260,
+          role: "img",
+          "aria-label": "Knowledge objects created per run",
+          preserveAspectRatio: "none",
+        });
+        drawKnowledgeChart(svg, series, 960);
+
+        const redraw = (measuredWidth) => {
+          if (measuredWidth > 0) {
+            drawKnowledgeChart(svg, series, Math.max(320, measuredWidth));
+          }
+        };
+        if (typeof ResizeObserver !== "undefined") {
+          const observer = new ResizeObserver((entries) => {
+            const measuredWidth = Math.round(entries[0].contentRect.width);
+            if (!svg.isConnected && measuredWidth === 0) {
+              observer.disconnect();
+              return;
+            }
+            redraw(measuredWidth);
+          });
+          observer.observe(svg);
+        } else if (typeof requestAnimationFrame !== "undefined") {
+          requestAnimationFrame(() => redraw(Math.round(svg.getBoundingClientRect().width)));
+        }
+        return svg;
+      })()
+    : el("div", {
+        class: "knowledge-chart__empty",
+        text: "No run history is available yet.",
+      });
+
+  return el(
+    "section",
+    { class: "knowledge-chart", "aria-labelledby": "knowledge-chart-title" },
+    [
+      el("div", { class: "knowledge-chart__header" }, [
+        el("div", {
+          id: "knowledge-chart-title",
+          class: "knowledge-chart__title",
+          text: "Knowledge objects created",
+        }),
+        el("div", {
+          class: "knowledge-chart__subtitle",
+          text: "Per run · last 12 runs · run dates in UTC",
+        }),
+      ]),
+      body,
+    ]
+  );
+}
+
+function sourceSummary(counts, unchanged) {
+  return el("div", { class: "source-summary" }, [
+    el("div", { class: "source-summary__counts" }, [
+      el("span", {}, [
+        el("strong", { text: counts.sources_examined }),
+        " sources examined",
+      ]),
+      el("span", {
+        class: "source-summary__separator",
+        "aria-hidden": "true",
+        text: "·",
+      }),
+      el("span", {}, [el("strong", { text: counts.sources_processed }), " processed"]),
+      el("span", {
+        class: "source-summary__separator",
+        "aria-hidden": "true",
+        text: "·",
+      }),
+      el("span", {}, [el("strong", { text: unchanged }), " unchanged"]),
+    ]),
+    el("div", {
+      class: "source-summary__note",
+      text: "Unchanged sources required no new processing.",
+    }),
+    counts.candidates_rejected
+      ? el("div", {
+          class: "source-summary__note",
+          text: `${counts.candidates_rejected} candidates rejected during this run.`,
+        })
+      : null,
   ]);
 }
 
 function runPage(ctx) {
   const summary = state.detail.summary;
   const counts = summary.counts;
-  const unchanged = counts.sources_examined - counts.sources_processed;
+  const unchanged =
+    counts.sources_skipped ?? counts.sources_examined - counts.sources_processed;
   const runStatus =
     summary.status === "success"
       ? statusCue("good", "success")
@@ -199,15 +375,8 @@ function runPage(ctx) {
         iconName: counts.errors ? "alert" : "check",
       }),
     ]),
-    el("div", { class: "secondary" }, [
-      el("span", {
-        text: `${counts.sources_processed} of ${counts.sources_examined} sources processed (${unchanged} unchanged)`,
-      }),
-      counts.candidates_rejected
-        ? el("span", { text: `  ·  ${counts.candidates_rejected} candidates rejected` })
-        : null,
-    ]),
-    sparkline(state.runs.runs),
+    sourceSummary(counts, unchanged),
+    knowledgeChart(state.runs.runs),
     counts.errors
       ? el("div", { class: "callout callout--danger" }, [
           icon("alert"),

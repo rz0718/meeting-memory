@@ -1858,6 +1858,7 @@ class StaticAssetTest(UiTestCase):
             "js/app.js",
             "js/queue.js",
             "js/runs.js",
+            "js/runs_chart.js",
             "js/ask.js",
             "js/projects.js",
         ):
