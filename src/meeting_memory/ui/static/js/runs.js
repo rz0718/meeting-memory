@@ -17,8 +17,6 @@ const state = {
   runs: null,
   runId: null,
   detail: null,
-  start: "",
-  end: "",
   expanded: {
     objects_refined: true,
     objects_reconfirmed: true,
@@ -40,10 +38,10 @@ export const runsView = {
   async render(ctx) {
     mount(ctx.content, busy("Loading run manifests…"));
     try {
-      state.runs = await api.runs({ start: state.start, end: state.end });
+      state.runs = await api.runs();
       if (!state.runs.runs.length) {
         mount(ctx.filters, filterBar(ctx));
-        mount(ctx.content, empty("No run manifests match this date range."));
+        mount(ctx.content, empty("No run manifests are available."));
         return;
       }
       if (!state.runs.runs.some((run) => run.run_id === state.runId)) {
@@ -78,50 +76,12 @@ function filterBar(ctx) {
     )
   );
 
-  const start = el("input", {
-    type: "date",
-    value: state.start,
-    onChange: (event) => {
-      state.start = event.target.value;
-      runsView.render(ctx);
-    },
-  });
-  const end = el("input", {
-    type: "date",
-    value: state.end,
-    onChange: (event) => {
-      state.end = event.target.value;
-      runsView.render(ctx);
-    },
-  });
-
-  const utcNote = "Run dates and this filter use the manifest's UTC date; the "
-    + "timestamps on the page are shown in " + timezoneSuffix() + ".";
-  return [
-    el("span", { class: "chip", title: utcNote }, [
-      el("span", { class: "chip__label", text: "Run date" }),
-      runSelect,
-    ]),
-    el("span", { class: "chip", title: utcNote }, [
-      el("span", { class: "chip__label", text: "Inserted from (UTC)" }),
-      start,
-    ]),
-    el("span", { class: "chip", title: utcNote }, [
-      el("span", { class: "chip__label", text: "to" }),
-      end,
-    ]),
-    state.start || state.end
-      ? el("button", {
-          class: "chip",
-          text: "Clear range",
-          onClick: () => {
-            state.start = "";
-            state.end = "";
-            runsView.render(ctx);
-          },
-        })
-      : null,
-  ].filter(Boolean);
+  const utcNote = "Run dates use the manifest's UTC date; the timestamps on the "
+    + "page are shown in " + timezoneSuffix() + ".";
+  return el("span", { class: "chip", title: utcNote }, [
+    el("span", { class: "chip__label", text: "Run date" }),
+    runSelect,
+  ]);
 }
 
 function statTile(label, value, { role = null, iconName = null, note = null } = {}) {

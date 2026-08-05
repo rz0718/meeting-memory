@@ -1864,6 +1864,14 @@ class StaticAssetTest(UiTestCase):
         ):
             self.assertEqual(200, self.client.get("/static/%s" % name).status_code, name)
 
+    def test_runs_view_has_only_the_run_date_control(self):
+        source = self.client.get("/static/js/runs.js").text
+
+        self.assertIn('text: "Run date"', source)
+        self.assertNotIn("Inserted from", source)
+        self.assertNotIn("Clear range", source)
+        self.assertIn("state.runs = await api.runs()", source)
+
 
 if __name__ == "__main__":
     unittest.main()
