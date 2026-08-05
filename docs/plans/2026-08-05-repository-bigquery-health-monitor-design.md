@@ -52,14 +52,16 @@ Historical state + anomaly evaluator
 Immutable run record + latest.json + latest.html + exit code
 ```
 
-The feature lives in a separate `meeting_memory/data_health` package. Its state
-does not mix with durable-knowledge state, although it follows this project's
-existing patterns of incremental checkpoints, immutable run manifests, and
-deterministic output.
+The monitor is a standalone application and package, independent of Meeting
+Memory. This repository is only the location of the approved requirements and
+design document. The implementation may reuse sound general patterns such as
+incremental checkpoints, immutable run manifests, atomic state writes, and
+deterministic output, but it must not inherit Meeting Memory's package layout,
+configuration model, or domain concepts.
 
 ## Configuration
 
-Use a dedicated `table-monitor.toml`. TOML represents multiple repositories and
+Use a dedicated `repo-bq-monitor.toml`. TOML represents multiple repositories and
 nested monitoring options without adding a YAML dependency. Configuration
 contains:
 
@@ -219,12 +221,14 @@ and the bytes cap is checked through dry runs before execution.
 
 ## Remote VM and Scheduling
 
-The CLI surface is:
+The application is a one-shot batch monitor with a small CLI as its operational
+entrypoint. The CLI is not the architecture itself; it is the stable contract
+used by people, cron, and systemd to start a run and inspect local results:
 
 ```bash
-meeting-memory data-health run --config /etc/meeting-memory/table-monitor.toml
-meeting-memory data-health report --config /etc/meeting-memory/table-monitor.toml
-meeting-memory data-health status --config /etc/meeting-memory/table-monitor.toml
+repo-bq-monitor run --config /etc/repo-bq-monitor/monitor.toml
+repo-bq-monitor report --config /etc/repo-bq-monitor/monitor.toml
+repo-bq-monitor status --config /etc/repo-bq-monitor/monitor.toml
 ```
 
 `run` performs exactly one bounded attempt and then exits. It uses a nonblocking
