@@ -59,6 +59,7 @@ export function chartSeries(runs, limit = 12) {
         date,
         dateLabel: compactDate(date),
         count: Number(run.counts?.objects_created || 0),
+        sourcesProcessed: Number(run.counts?.sources_processed || 0),
       };
     });
 }

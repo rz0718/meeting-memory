@@ -7,7 +7,7 @@
 // whose count and SHA-256 the apply call asserts.
 
 import { api } from "./api.js";
-import { calendarDate, el, icon, instant, mount, property } from "./dom.js";
+import { calendarDate, callout, el, icon, instant, mount, property } from "./dom.js";
 import { evidenceList } from "./evidence.js";
 import { busy, closeModal, openModal, openPeek, reportError, toast } from "./ui.js";
 import { refreshBasket, refreshKnowledge, store } from "./store.js";
@@ -22,14 +22,21 @@ export async function openObjectPeek(objectId) {
   }
 }
 
-function objectView(object) {
-  const props = el("div", { class: "props" }, [
-    ...property("Category", object.category),
+export function objectView(object, { actions = true } = {}) {
+  const untrustworthyEvidence = (object.evidence || []).some(
+    (entry) => entry.freshness_label === "drifted" || entry.freshness_label === "unavailable"
+  );
+
+  const status = el("div", { class: "props" }, [
     ...property("Status", object.status),
-    ...property("Owner", object.owner),
-    ...property("Confidence", object.confidence),
     ...property("Effective date", calendarDate(object.effective_date)),
     ...property("Last confirmed", calendarDate(object.last_confirmed)),
+  ]);
+
+  const props = el("div", { class: "props" }, [
+    ...property("Category", object.category),
+    ...property("Owner", object.owner),
+    ...property("Confidence", object.confidence),
     ...property("Created", instant(object.created_at)),
     ...property("Updated", instant(object.updated_at)),
     ...property(
@@ -85,20 +92,32 @@ function objectView(object) {
       : null,
     el("h2", { class: "section", text: "Statement" }),
     el("div", { class: "compare__text", text: object.statement }),
-    props,
     el("h2", { class: "section", text: "Evidence" }),
+    untrustworthyEvidence
+      ? callout(
+          "warning",
+          "Source text has changed",
+          "One or more cited excerpts have changed since extraction, or could not be read. " +
+            "The excerpt below shows the source as it reads now, not as it read at extraction time."
+        )
+      : null,
     evidenceList(object.evidence),
+    el("h2", { class: "section", text: "Status" }),
+    status,
+    props,
     history,
-    el("div", { class: "actionbar" }, [
-      el("button", {
-        class: "btn",
-        onClick: () => openMergeDialog(object.id),
-      }, [icon("merge"), el("span", { text: "Merge into…" })]),
-      el("button", {
-        class: "btn btn--danger",
-        onClick: () => flagForRemoval(object.id),
-      }, [icon("trash"), el("span", { text: "Flag for removal" })]),
-    ]),
+    actions
+      ? el("div", { class: "actionbar" }, [
+          el("button", {
+            class: "btn",
+            onClick: () => openMergeDialog(object.id),
+          }, [icon("merge"), el("span", { text: "Merge into…" })]),
+          el("button", {
+            class: "btn btn--danger",
+            onClick: () => flagForRemoval(object.id),
+          }, [icon("trash"), el("span", { text: "Flag for removal" })]),
+        ])
+      : null,
   ]);
 }
 

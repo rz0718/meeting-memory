@@ -19,6 +19,10 @@ export function bindQueueNavigation(handler) {
   openQueueItem = handler;
 }
 
+export function openQueueCase(reviewId) {
+  if (openQueueItem) openQueueItem(reviewId);
+}
+
 export async function openReviewPeek(reviewId) {
   openPeek(reviewId, busy("Loading review case…"));
   try {

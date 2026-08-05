@@ -23,3 +23,5 @@ secrets.json
 knowledge-review/
 logs/
 outputs/
+# macOS metadata
+.DS_Store

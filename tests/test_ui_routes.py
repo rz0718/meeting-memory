@@ -1859,6 +1859,7 @@ class StaticAssetTest(UiTestCase):
             "js/queue.js",
             "js/runs.js",
             "js/runs_chart.js",
+            "js/knowledge_inbox.js",
             "js/ask.js",
             "js/projects.js",
         ):
@@ -1875,6 +1876,23 @@ class StaticAssetTest(UiTestCase):
         self.assertIn('title: "Knowledge Updates"', source)
         self.assertNotIn("Today's Knowledge", source)
         self.assertIn("fullDateLabel(summary.started_at)", source)
+
+    def test_runs_view_uses_the_split_inbox_layout(self):
+        source = self.client.get("/static/js/runs.js").text
+
+        self.assertIn('class: "split"', source)
+        self.assertIn('inbox__list', source)
+        self.assertIn('inbox__reader', source)
+
+    def test_runs_view_filtering_does_not_reenter_the_render_path(self):
+        source = self.client.get("/static/js/runs.js").text
+        marker = "function onFilterChange()"
+        self.assertIn(marker, source)
+        body = source.split(marker, 1)[1].split("\n}", 1)[0]
+
+        self.assertNotIn("api.runs()", body)
+        self.assertNotIn("api.run(", body)
+        self.assertNotIn("runsView.render", body)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,26 @@
 // Tab 1 — Knowledge Updates.
 //
-// Purpose: verify what the pipeline decided on its own. These changes were
-// applied without a human, so the tab is grouped by manifest bucket ("what
-// changed") rather than by category, and refined/reconfirmed sit above created
-// because they warrant more scrutiny.
+// Purpose: a knowledge inbox for verifying what the pipeline decided on its
+// own. Objects are grouped by manifest bucket ("what changed") in the order
+// the run payload emits them — Created, then Refined, then Reconfirmed —
+// which matches how the page is read: newest knowledge first, then what
+// changed, then what merely held. Reconfirmed is collapsed by default because
+// it carries no new information and would otherwise bury the run's actual
+// news under its own restatements.
 
 import { api } from "./api.js";
-import { badge, el, icon, instant, mount, statusCue, timezoneSuffix } from "./dom.js";
-import { openObjectPeek } from "./objects.js";
-import { openReviewPeek } from "./reviewpeek.js";
+import { el, icon, instant, mount, statusCue, timezoneSuffix } from "./dom.js";
+import {
+  COLLAPSED_BY_DEFAULT,
+  ORDINARY_BUCKETS,
+  defaultSelectionId,
+  filterGroups,
+  inboxGroups,
+  objectCount,
+  reviewCandidateCount,
+} from "./knowledge_inbox.js";
+import { objectView } from "./objects.js";
+import { openQueueCase } from "./reviewpeek.js";
 import { chartSeries, fullDateLabel, pointX, yTicks } from "./runs_chart.js";
 import { busy, empty, reportError } from "./ui.js";
 import { emit } from "./store.js";
@@ -17,13 +29,16 @@ const state = {
   runs: null,
   runId: null,
   detail: null,
-  expanded: {
-    objects_refined: true,
-    objects_reconfirmed: true,
-    objects_created: true,
-    review_items_created: true,
-  },
+  filters: { search: "", category: "" },
+  selectedId: null,
+  expanded: Object.fromEntries(
+    ORDINARY_BUCKETS.map((bucket) => [bucket, !COLLAPSED_BY_DEFAULT.has(bucket)])
+  ),
+  runDetailsOpen: false,
 };
+
+let currentCtx = null;
+let chartNode = null;
 
 export const runsView = {
   id: "runs",
@@ -32,10 +47,12 @@ export const runsView = {
   title: "Knowledge Updates",
 
   count() {
-    return state.detail ? state.detail.summary.counts.objects_created : null;
+    return state.detail ? objectCount(inboxGroups(state.detail)) : null;
   },
 
   async render(ctx) {
+    currentCtx = ctx;
+    ctx.content.style.padding = "0";
     mount(ctx.content, busy("Loading run manifests…"));
     try {
       state.runs = await api.runs();
@@ -48,8 +65,13 @@ export const runsView = {
         state.runId = state.runs.runs[0].run_id;
       }
       state.detail = await api.run(state.runId);
+      chartNode = null;
+      state.runDetailsOpen = false;
+      state.selectedId = defaultSelectionId(filterGroups(inboxGroups(state.detail), state.filters));
       mount(ctx.filters, filterBar(ctx));
-      mount(ctx.content, runPage(ctx));
+      mount(ctx.content, page());
+      renderList();
+      renderReader();
       emit();
     } catch (error) {
       reportError(error);
@@ -57,6 +79,29 @@ export const runsView = {
     }
   },
 };
+
+// -- filter bar ---------------------------------------------------------------
+
+function availableCategories() {
+  const found = new Set();
+  for (const group of inboxGroups(state.detail)) {
+    for (const row of group.rows) {
+      if (row.category) found.add(row.category);
+    }
+  }
+  return [...found].sort();
+}
+
+function onFilterChange() {
+  renderList();
+  renderReader();
+}
+
+function clearFilters() {
+  state.filters = { search: "", category: "" };
+  if (currentCtx) mount(currentCtx.filters, filterBar(currentCtx));
+  onFilterChange();
+}
 
 function filterBar(ctx) {
   const runSelect = el(
@@ -78,11 +123,397 @@ function filterBar(ctx) {
 
   const utcNote = "Run dates use the manifest's UTC date; the timestamps on the "
     + "page are shown in " + timezoneSuffix() + ".";
-  return el("span", { class: "chip", title: utcNote }, [
+  const runChip = el("span", { class: "chip", title: utcNote }, [
     el("span", { class: "chip__label", text: "Run date" }),
     runSelect,
   ]);
+
+  const searchInput = el("input", {
+    placeholder: "Search title or statement…",
+    value: state.filters.search,
+    onInput: (event) => {
+      state.filters.search = event.target.value;
+      onFilterChange();
+    },
+  });
+  const searchChip = el("span", { class: "chip" }, [
+    el("span", { class: "chip__label", text: "Search" }),
+    searchInput,
+  ]);
+
+  const categorySelect = el(
+    "select",
+    {
+      onChange: (event) => {
+        state.filters.category = event.target.value;
+        onFilterChange();
+      },
+    },
+    [
+      el("option", {
+        value: "",
+        text: "All categories",
+        selected: state.filters.category === "",
+      }),
+      ...availableCategories().map((category) =>
+        el("option", {
+          value: category,
+          text: category,
+          selected: state.filters.category === category,
+        })
+      ),
+    ]
+  );
+  const categoryChip = el("span", { class: "chip" }, [
+    el("span", { class: "chip__label", text: "Category" }),
+    categorySelect,
+  ]);
+
+  return [runChip, searchChip, categoryChip];
 }
+
+// -- page shell -----------------------------------------------------------
+
+function page() {
+  return el("div", {}, [
+    inboxHeader(),
+    el("div", { class: "split" }, [
+      el("div", { class: "queue inbox__list" }),
+      el("div", { class: "inbox__reader-pane" }, [
+        el(
+          "button",
+          { class: "inbox__back", onClick: () => setMobileReaderOpen(false) },
+          [el("span", { text: "← Back to knowledge list" })]
+        ),
+        el("div", { class: "detail inbox__reader" }),
+      ]),
+    ]),
+    el("div", { class: "run-details-mount" }, [buildRunDetailsSection()]),
+  ]);
+}
+
+function setMobileReaderOpen(open) {
+  const split = document.querySelector(".split");
+  if (split) split.classList.toggle("is-reading", open);
+}
+
+function inboxHeader() {
+  const summary = state.detail.summary;
+  const counts = summary.counts;
+  const runStatus =
+    summary.status === "success"
+      ? statusCue("good", "success")
+      : summary.status === "partial_failure"
+      ? statusCue("warning", "partial failure")
+      : statusCue("critical", "failed");
+  const total = objectCount(inboxGroups(state.detail));
+  const reviewCount = reviewCandidateCount(state.detail);
+
+  return el("div", { class: "inbox__header" }, [
+    el("div", { class: "page-title", text: fullDateLabel(summary.started_at) }),
+    el("div", { class: "page-sub" }, [
+      instant(summary.started_at),
+      el("span", { text: " → " }),
+      instant(summary.completed_at, { withDate: false }),
+      el("span", { text: "  " }),
+      runStatus,
+      el("span", {
+        text: `  ·  meeting dates ${summary.target_dates[0] || "—"}–${
+          summary.target_dates[summary.target_dates.length - 1] || "—"
+        }`,
+      }),
+    ]),
+    el(
+      "div",
+      { class: "inbox__header-meta" },
+      [
+        el("span", {
+          class: "inbox__object-count",
+          text: `${total} knowledge object${total === 1 ? "" : "s"}`,
+        }),
+        reviewCount
+          ? el(
+              "a",
+              {
+                href: "#",
+                class: "inbox__review-link",
+                onClick: (event) => {
+                  event.preventDefault();
+                  const id = firstReviewCandidateId();
+                  if (id) openQueueCase(id);
+                },
+              },
+              [el("span", { text: `${reviewCount} sent to review` }), icon("chevronRight")]
+            )
+          : null,
+        counts.errors
+          ? el(
+              "button",
+              { class: "inbox__error-warning", onClick: openRunDetails },
+              [
+                icon("alert"),
+                el("span", {
+                  text: `${counts.errors} run error${counts.errors === 1 ? "" : "s"} — see Run details`,
+                }),
+              ]
+            )
+          : null,
+      ].filter(Boolean)
+    ),
+  ]);
+}
+
+function firstReviewCandidateId() {
+  const group = state.detail.groups.find((entry) => entry.bucket === "review_items_created");
+  return group && group.rows.length ? group.rows[0].id : null;
+}
+
+// -- knowledge list ---------------------------------------------------------
+
+function renderList() {
+  const node = document.querySelector(".inbox__list");
+  if (!node) return;
+  const groups = filterGroups(inboxGroups(state.detail), state.filters);
+  if (!groups.some((group) => group.rows.some((row) => row.id === state.selectedId))) {
+    state.selectedId = defaultSelectionId(groups);
+  }
+  mount(node, groups.length ? groups.map((group) => listGroupNode(group)) : [listEmptyState()]);
+}
+
+function listEmptyState() {
+  if (state.filters.search || state.filters.category) {
+    return el("div", { class: "empty" }, [
+      el("div", { text: "No knowledge objects match these filters." }),
+      el("button", { class: "btn", text: "Clear filters", onClick: clearFilters }),
+    ]);
+  }
+  return el("div", { class: "empty", text: "This run has no ordinary knowledge objects." });
+}
+
+function listGroupNode(group) {
+  const open = state.expanded[group.bucket] !== false;
+  const rows = el("div", {}, group.rows.map((row) => listItemNode(row, group)));
+  rows.hidden = !open;
+
+  const toggle = el(
+    "button",
+    {
+      class: "queue__group-label group-toggle",
+      "aria-expanded": open ? "true" : "false",
+      onClick: () => {
+        state.expanded[group.bucket] = rows.hidden;
+        rows.hidden = !rows.hidden;
+        toggle.setAttribute("aria-expanded", rows.hidden ? "false" : "true");
+      },
+    },
+    [
+      icon("chevron"),
+      el("span", { text: group.label }),
+      el("span", { class: "group-toggle__count", text: String(group.rows.length) }),
+    ]
+  );
+  return el("div", { class: "queue__group" }, [toggle, rows]);
+}
+
+function listItemNode(row, group) {
+  return el(
+    "button",
+    {
+      class: `queue__item inbox__item${row.id === state.selectedId ? " is-active" : ""}`,
+      disabled: !row.present,
+      onClick: () => selectItem(row.id),
+    },
+    [
+      el(
+        "div",
+        { class: "queue__item-meta" },
+        [
+          el("span", { text: row.category || "—" }),
+          el("span", { class: "inbox__item-outcome", text: group.label }),
+          row.present ? null : statusCue("muted", "no longer present"),
+        ].filter(Boolean)
+      ),
+      el("div", { class: "queue__item-title", text: row.title || row.id }),
+      el("div", { class: "inbox__item-preview", text: row.statement || "" }),
+    ]
+  );
+}
+
+// -- knowledge reader ---------------------------------------------------------
+
+function flattenRows(groups) {
+  return groups.flatMap((group) => group.rows.map((row) => ({ ...row, groupLabel: group.label })));
+}
+
+function selectItem(id) {
+  if (!id) return;
+  state.selectedId = id;
+  setMobileReaderOpen(true);
+  renderList();
+  renderReader();
+}
+
+function renderReader() {
+  const node = document.querySelector(".inbox__reader");
+  if (!node) return;
+  const groups = filterGroups(inboxGroups(state.detail), state.filters);
+  const flat = flattenRows(groups);
+  const row = flat.find((entry) => entry.id === state.selectedId);
+  if (!row) {
+    mount(node, readerEmptyState());
+    return;
+  }
+  paintReaderRow(node, row, flat.filter((entry) => entry.present));
+}
+
+function readerEmptyState() {
+  const rawGroups = inboxGroups(state.detail);
+  if (objectCount(rawGroups) === 0) {
+    return el("div", {
+      class: "empty",
+      text: "This run did not create, refine, or reconfirm any knowledge objects.",
+    });
+  }
+  const anyPresent = rawGroups.some((group) => group.rows.some((row) => row.present));
+  if (!anyPresent) {
+    return el("div", {
+      class: "empty",
+      text: "Every knowledge object from this run is no longer present in the canonical repository.",
+    });
+  }
+  return el("div", { class: "empty" }, [
+    el("div", { text: "No knowledge objects match these filters." }),
+    el("button", { class: "btn", text: "Clear filters", onClick: clearFilters }),
+  ]);
+}
+
+function readerNav(flat, index) {
+  const prevDisabled = index <= 0;
+  const nextDisabled = index < 0 || index >= flat.length - 1;
+  return el("div", { class: "inbox__nav" }, [
+    el(
+      "button",
+      { class: "btn", disabled: prevDisabled, onClick: () => selectItem(flat[index - 1].id) },
+      [el("span", { text: "← Previous" })]
+    ),
+    el("span", {
+      class: "inbox__nav-position",
+      text: flat.length && index >= 0 ? `${index + 1} of ${flat.length}` : "",
+    }),
+    el(
+      "button",
+      { class: "btn", disabled: nextDisabled, onClick: () => selectItem(flat[index + 1].id) },
+      [el("span", { text: "Next →" })]
+    ),
+  ]);
+}
+
+function refinementSection(row) {
+  if (row.bucket !== "objects_refined") return null;
+  const refinement = row.refinement || {};
+  return el("div", {}, [
+    el("h2", { class: "section", text: "Refinement" }),
+    refinement.available
+      ? el("div", { class: "compare" }, [
+          el("div", { class: "compare__col" }, [
+            el("div", { class: "compare__head", text: "Before" }),
+            el("div", { class: "compare__text" }, diffSegments(refinement.diff.left)),
+          ]),
+          el("div", { class: "compare__col" }, [
+            el("div", { class: "compare__head", text: "After" }),
+            el("div", { class: "compare__text" }, diffSegments(refinement.diff.right)),
+          ]),
+        ])
+      : el("div", { class: "callout" }, [
+          icon("history"),
+          el("div", { class: "callout__body" }, [
+            el("div", { text: `Refined — prior text unavailable (${refinement.reason}).` }),
+            refinement.entry
+              ? el("div", {
+                  class: "secondary",
+                  text: `History: ${refinement.entry.date} — ${refinement.entry.text}`,
+                })
+              : null,
+            refinement.after
+              ? el("div", { class: "compare__text", text: refinement.after })
+              : null,
+          ]),
+        ]),
+  ]);
+}
+
+function paintReaderRow(node, row, presentFlat) {
+  const index = presentFlat.findIndex((entry) => entry.id === row.id);
+  mount(
+    node,
+    [
+      readerNav(presentFlat, index),
+      el("div", { class: "page-title", text: row.title || row.id }),
+      el("div", { class: "page-sub" }, [
+        el("span", { text: row.category || "—" }),
+        el("span", { text: "  ·  " }),
+        el("span", { text: row.groupLabel }),
+      ]),
+      el("h2", { class: "section", text: "Statement" }),
+      el("div", { class: "compare__text", text: row.statement || "" }),
+      refinementSection(row),
+      el("h2", { class: "section", text: "Evidence" }),
+      busy("Loading evidence and details…"),
+    ].filter(Boolean)
+  );
+
+  hydrateReader(row, node, presentFlat, index);
+}
+
+async function hydrateReader(row, node, presentFlat, index) {
+  try {
+    const object = await api.knowledge(row.id);
+    if (state.selectedId !== row.id) return;
+    mount(
+      node,
+      [readerNav(presentFlat, index), objectView(object), refinementSection(row)].filter(
+        Boolean
+      )
+    );
+  } catch (error) {
+    if (state.selectedId !== row.id) return;
+    mount(
+      node,
+      [
+        readerNav(presentFlat, index),
+        el("div", { class: "page-title", text: row.title || row.id }),
+        el("h2", { class: "section", text: "Statement" }),
+        el("div", { class: "compare__text", text: row.statement || "" }),
+        refinementSection(row),
+        el("div", { class: "callout callout--danger" }, [
+          icon("alert"),
+          el("div", { class: "callout__body" }, [
+            el("div", { class: "callout__title", text: "Could not load evidence and details" }),
+            el("div", { text: `${error.type}: ${error.message}` }),
+          ]),
+        ]),
+        el("button", {
+          class: "btn",
+          text: "Retry",
+          onClick: () => paintReaderRow(node, row, presentFlat),
+        }),
+      ].filter(Boolean)
+    );
+    reportError(error);
+  }
+}
+
+function diffSegments(segments) {
+  return (segments || []).map((segment) =>
+    el("span", {
+      class:
+        segment.kind === "added" ? "diff-add" : segment.kind === "removed" ? "diff-del" : "",
+      text: segment.text,
+    })
+  );
+}
+
+// -- run details --------------------------------------------------------------
 
 function statTile(label, value, { role = null, iconName = null, note = null } = {}) {
   return el("div", { class: `stat${role ? ` stat--${role}` : ""}` }, [
@@ -93,6 +524,115 @@ function statTile(label, value, { role = null, iconName = null, note = null } = 
     ]),
     note ? el("div", { class: "stat__note", text: note }) : null,
   ]);
+}
+
+function sourceSummary(counts, unchanged) {
+  return el("div", { class: "source-summary" }, [
+    el("div", { class: "source-summary__counts" }, [
+      el("span", {}, [
+        el("strong", { text: counts.sources_examined }),
+        " sources examined",
+      ]),
+      el("span", {
+        class: "source-summary__separator",
+        "aria-hidden": "true",
+        text: "·",
+      }),
+      el("span", {}, [el("strong", { text: counts.sources_processed }), " processed"]),
+      el("span", {
+        class: "source-summary__separator",
+        "aria-hidden": "true",
+        text: "·",
+      }),
+      el("span", {}, [el("strong", { text: unchanged }), " unchanged"]),
+    ]),
+    el("div", {
+      class: "source-summary__note",
+      text: "Unchanged sources required no new processing.",
+    }),
+    counts.candidates_rejected
+      ? el("div", {
+          class: "source-summary__note",
+          text: `${counts.candidates_rejected} candidates rejected during this run.`,
+        })
+      : null,
+  ]);
+}
+
+function openRunDetails() {
+  state.runDetailsOpen = true;
+  renderRunDetails();
+  const node = document.querySelector(".run-details-mount");
+  if (node) node.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderRunDetails() {
+  const node = document.querySelector(".run-details-mount");
+  if (!node) return;
+  mount(node, buildRunDetailsSection());
+}
+
+function buildRunDetailsSection() {
+  const summary = state.detail.summary;
+  const counts = summary.counts;
+  const unchanged =
+    counts.sources_skipped ?? counts.sources_examined - counts.sources_processed;
+  const open = state.runDetailsOpen;
+
+  if (open && !chartNode) chartNode = knowledgeChart(state.runs.runs);
+
+  const body = el(
+    "div",
+    {},
+    [
+      el("div", { class: "stat-row" }, [
+        statTile("Created", counts.objects_created),
+        statTile("Reconfirmed", counts.objects_reconfirmed),
+        statTile("Refined", counts.objects_refined),
+        statTile("Sent to review", counts.review_items_created, {
+          role: "warning",
+          iconName: "queue",
+        }),
+        statTile("Errors", counts.errors, {
+          role: counts.errors ? "critical" : "good",
+          iconName: counts.errors ? "alert" : "check",
+        }),
+      ]),
+      sourceSummary(counts, unchanged),
+      counts.errors
+        ? el("div", { class: "callout callout--danger" }, [
+            icon("alert"),
+            el("div", { class: "callout__body" }, [
+              el("div", { class: "callout__title", text: "Run errors" }),
+              el(
+                "ul",
+                { class: "list-tight" },
+                state.detail.errors.map((error) =>
+                  el("li", { text: error.error || JSON.stringify(error) })
+                )
+              ),
+            ]),
+          ])
+        : null,
+      open && chartNode ? chartNode : null,
+    ].filter(Boolean)
+  );
+  body.hidden = !open;
+
+  const toggle = el(
+    "button",
+    {
+      class: "group-toggle",
+      "aria-expanded": open ? "true" : "false",
+      onClick: () => {
+        state.runDetailsOpen = !state.runDetailsOpen;
+        renderRunDetails();
+      },
+    },
+    [icon("chevron"), el("span", { text: "Run details" })]
+  );
+
+  return el("section", { class: "run-details" }, [toggle, body]);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -106,27 +646,23 @@ function svgElement(tag, attributes = {}, children = []) {
   return node;
 }
 
-function drawKnowledgeChart(svg, series, width) {
-  const height = 260;
-  const margins = { top: 30, right: 18, bottom: 50, left: 46 };
+function drawLineChart(svg, series, width, config) {
+  const { height, margins, valueKey, ariaTitle, pointLabel, showDates } = config;
   const plotWidth = width - margins.left - margins.right;
   const plotHeight = height - margins.top - margins.bottom;
   const plotBottom = margins.top + plotHeight;
-  const ticks = yTicks(series.map((entry) => entry.count));
+  const ticks = yTicks(series.map((entry) => entry[valueKey]));
   const maximum = ticks[ticks.length - 1];
   const points = series.map((entry, index) => ({
     ...entry,
+    value: entry[valueKey],
     x: pointX(index, series.length, margins.left, plotWidth),
-    y: margins.top + (1 - entry.count / maximum) * plotHeight,
+    y: margins.top + (1 - entry[valueKey] / maximum) * plotHeight,
   }));
 
   svg.replaceChildren();
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.appendChild(
-    svgElement("title", {}, [
-      document.createTextNode("Knowledge objects created in each of the last 12 runs"),
-    ])
-  );
+  svg.appendChild(svgElement("title", {}, [document.createTextNode(ariaTitle)]));
 
   for (const tick of ticks) {
     const y = margins.top + (1 - tick / maximum) * plotHeight;
@@ -163,9 +699,7 @@ function drawKnowledgeChart(svg, series, width) {
   }
 
   points.forEach((point, index) => {
-    const label = `${point.date}: ${point.count} knowledge object${
-      point.count === 1 ? "" : "s"
-    } created`;
+    const label = pointLabel(point);
     const circle = svgElement("circle", {
       class: "knowledge-chart__point",
       cx: point.x,
@@ -184,9 +718,10 @@ function drawKnowledgeChart(svg, series, width) {
       y: Math.max(16, point.y - 10),
       "text-anchor": "middle",
     });
-    count.textContent = String(point.count);
+    count.textContent = String(point.value);
     svg.appendChild(count);
 
+    if (!showDates) return;
     const showDate =
       width >= 720 ||
       points.length <= 6 ||
@@ -205,39 +740,64 @@ function drawKnowledgeChart(svg, series, width) {
   });
 }
 
+function miniChart(series, config) {
+  const svg = svgElement("svg", {
+    class: "knowledge-chart__svg",
+    height: config.height,
+    role: "img",
+    "aria-label": config.ariaTitle,
+    preserveAspectRatio: "none",
+  });
+  drawLineChart(svg, series, 960, config);
+
+  const redraw = (measuredWidth) => {
+    if (measuredWidth > 0) drawLineChart(svg, series, Math.max(320, measuredWidth), config);
+  };
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver((entries) => {
+      const measuredWidth = Math.round(entries[0].contentRect.width);
+      if (!svg.isConnected && measuredWidth === 0) {
+        observer.disconnect();
+        return;
+      }
+      redraw(measuredWidth);
+    });
+    observer.observe(svg);
+  } else if (typeof requestAnimationFrame !== "undefined") {
+    requestAnimationFrame(() => redraw(Math.round(svg.getBoundingClientRect().width)));
+  }
+
+  return el("div", { class: "knowledge-chart__mini" }, [
+    el("div", { class: "knowledge-chart__subhead", text: config.subhead }),
+    svg,
+  ]);
+}
+
 function knowledgeChart(runs) {
   const series = chartSeries(runs);
   const body = series.length
-    ? (() => {
-        const svg = svgElement("svg", {
-          class: "knowledge-chart__svg",
-          height: 260,
-          role: "img",
-          "aria-label": "Knowledge objects created per run",
-          preserveAspectRatio: "none",
-        });
-        drawKnowledgeChart(svg, series, 960);
-
-        const redraw = (measuredWidth) => {
-          if (measuredWidth > 0) {
-            drawKnowledgeChart(svg, series, Math.max(320, measuredWidth));
-          }
-        };
-        if (typeof ResizeObserver !== "undefined") {
-          const observer = new ResizeObserver((entries) => {
-            const measuredWidth = Math.round(entries[0].contentRect.width);
-            if (!svg.isConnected && measuredWidth === 0) {
-              observer.disconnect();
-              return;
-            }
-            redraw(measuredWidth);
-          });
-          observer.observe(svg);
-        } else if (typeof requestAnimationFrame !== "undefined") {
-          requestAnimationFrame(() => redraw(Math.round(svg.getBoundingClientRect().width)));
-        }
-        return svg;
-      })()
+    ? el("div", { class: "knowledge-chart__body" }, [
+        miniChart(series, {
+          height: 190,
+          margins: { top: 24, right: 18, bottom: 16, left: 46 },
+          valueKey: "count",
+          subhead: "Knowledge objects created",
+          ariaTitle: "Knowledge objects created per run",
+          showDates: false,
+          pointLabel: (point) =>
+            `${point.date}: ${point.value} knowledge object${point.value === 1 ? "" : "s"} created`,
+        }),
+        miniChart(series, {
+          height: 210,
+          margins: { top: 24, right: 18, bottom: 44, left: 46 },
+          valueKey: "sourcesProcessed",
+          subhead: "Sources processed",
+          ariaTitle: "Sources processed per run",
+          showDates: true,
+          pointLabel: (point) =>
+            `${point.date}: ${point.value} source${point.value === 1 ? "" : "s"} processed`,
+        }),
+      ])
     : el("div", {
         class: "knowledge-chart__empty",
         text: "No run history is available yet.",
@@ -251,7 +811,7 @@ function knowledgeChart(runs) {
         el("div", {
           id: "knowledge-chart-title",
           class: "knowledge-chart__title",
-          text: "Knowledge objects created",
+          text: "Run history",
         }),
         el("div", {
           class: "knowledge-chart__subtitle",
@@ -263,222 +823,22 @@ function knowledgeChart(runs) {
   );
 }
 
-function sourceSummary(counts, unchanged) {
-  return el("div", { class: "source-summary" }, [
-    el("div", { class: "source-summary__counts" }, [
-      el("span", {}, [
-        el("strong", { text: counts.sources_examined }),
-        " sources examined",
-      ]),
-      el("span", {
-        class: "source-summary__separator",
-        "aria-hidden": "true",
-        text: "·",
-      }),
-      el("span", {}, [el("strong", { text: counts.sources_processed }), " processed"]),
-      el("span", {
-        class: "source-summary__separator",
-        "aria-hidden": "true",
-        text: "·",
-      }),
-      el("span", {}, [el("strong", { text: unchanged }), " unchanged"]),
-    ]),
-    el("div", {
-      class: "source-summary__note",
-      text: "Unchanged sources required no new processing.",
-    }),
-    counts.candidates_rejected
-      ? el("div", {
-          class: "source-summary__note",
-          text: `${counts.candidates_rejected} candidates rejected during this run.`,
-        })
-      : null,
-  ]);
-}
+// -- keyboard ---------------------------------------------------------------
 
-function runPage(ctx) {
-  const summary = state.detail.summary;
-  const counts = summary.counts;
-  const unchanged =
-    counts.sources_skipped ?? counts.sources_examined - counts.sources_processed;
-  const runStatus =
-    summary.status === "success"
-      ? statusCue("good", "success")
-      : summary.status === "partial_failure"
-      ? statusCue("warning", "partial failure")
-      : statusCue("critical", "failed");
-
-  return el("div", {}, [
-    el("div", { class: "page-title", text: fullDateLabel(summary.started_at) }),
-    el("div", { class: "page-sub" }, [
-      instant(summary.started_at),
-      el("span", { text: " → " }),
-      instant(summary.completed_at, { withDate: false }),
-      el("span", { text: "  " }),
-      runStatus,
-      el("span", {
-        text: `  ·  meeting dates ${summary.target_dates[0] || "—"}–${
-          summary.target_dates[summary.target_dates.length - 1] || "—"
-        }`,
-      }),
-    ]),
-    el("div", { class: "stat-row" }, [
-      statTile("Created", counts.objects_created),
-      statTile("Reconfirmed", counts.objects_reconfirmed),
-      statTile("Refined", counts.objects_refined),
-      statTile("Sent to review", counts.review_items_created, {
-        role: "warning",
-        iconName: "queue",
-      }),
-      statTile("Errors", counts.errors, {
-        role: counts.errors ? "critical" : "good",
-        iconName: counts.errors ? "alert" : "check",
-      }),
-    ]),
-    sourceSummary(counts, unchanged),
-    knowledgeChart(state.runs.runs),
-    counts.errors
-      ? el("div", { class: "callout callout--danger" }, [
-          icon("alert"),
-          el("div", { class: "callout__body" }, [
-            el("div", { class: "callout__title", text: "Run errors" }),
-            el(
-              "ul",
-              { class: "list-tight" },
-              state.detail.errors.map((error) =>
-                el("li", { text: error.error || JSON.stringify(error) })
-              )
-            ),
-          ]),
-        ])
-      : null,
-    ...state.detail.groups.map((group) => groupBlock(group, ctx)),
-  ]);
-}
-
-function groupBlock(group, ctx) {
-  const open = state.expanded[group.bucket] !== false;
-  const rows = el(
-    "div",
-    { class: "rows" },
-    group.rows.length
-      ? group.rows.map((row) =>
-          group.bucket === "review_items_created" ? reviewRow(row) : objectRow(row, ctx)
-        )
-      : [el("div", { class: "empty", text: "Nothing in this bucket." })]
+export function handleRunsKey(event) {
+  if (!state.detail) return false;
+  const flat = flattenRows(filterGroups(inboxGroups(state.detail), state.filters)).filter(
+    (row) => row.present
   );
-  rows.hidden = !open;
-
-  const toggle = el(
-    "button",
-    {
-      class: "group-toggle",
-      "aria-expanded": open ? "true" : "false",
-      onClick: () => {
-        state.expanded[group.bucket] = rows.hidden;
-        rows.hidden = !rows.hidden;
-        toggle.setAttribute("aria-expanded", rows.hidden ? "false" : "true");
-      },
-    },
-    [
-      icon("chevron"),
-      el("span", { text: group.label }),
-      el("span", { class: "group-toggle__count", text: String(group.count) }),
-    ]
-  );
-  return el("section", {}, [toggle, rows]);
-}
-
-function objectRow(row, ctx) {
-  const node = el(
-    "div",
-    {
-      class: "row",
-      onClick: () => (row.present ? openObjectPeek(row.id) : null),
-    },
-    [
-      el("span", { class: "row__label", text: row.category || "missing" }),
-      el("span", { class: "row__title", text: row.title || row.id }),
-      el("span", { class: "row__id", text: row.id }),
-      row.present ? null : statusCue("muted", "no longer present"),
-      row.present
-        ? el("button", {
-            class: "row__open",
-            text: "Open",
-            onClick: (event) => {
-              event.stopPropagation();
-              openObjectPeek(row.id);
-            },
-          })
-        : null,
-    ].filter(Boolean)
-  );
-
-  if (row.bucket !== "objects_refined") return node;
-
-  const refinement = row.refinement || {};
-  const detail = el("div", { style: "padding:0 8px 10px" }, [
-    refinement.available
-      ? el("div", { class: "compare" }, [
-          el("div", { class: "compare__col" }, [
-            el("div", { class: "compare__head", text: "Before" }),
-            el("div", { class: "compare__text" }, diffSegments(refinement.diff.left)),
-          ]),
-          el("div", { class: "compare__col" }, [
-            el("div", { class: "compare__head", text: "After" }),
-            el("div", { class: "compare__text" }, diffSegments(refinement.diff.right)),
-          ]),
-        ])
-      : el("div", { class: "callout" }, [
-          icon("history"),
-          el("div", { class: "callout__body" }, [
-            el("div", { text: `Refined — prior text unavailable (${refinement.reason}).` }),
-            refinement.entry
-              ? el("div", {
-                  class: "secondary",
-                  text: `History: ${refinement.entry.date} — ${refinement.entry.text}`,
-                })
-              : null,
-            refinement.after
-              ? el("div", { class: "compare__text", text: refinement.after })
-              : null,
-          ]),
-        ]),
-  ]);
-  return el("div", {}, [node, detail]);
-}
-
-function diffSegments(segments) {
-  return (segments || []).map((segment) =>
-    el("span", {
-      class:
-        segment.kind === "added" ? "diff-add" : segment.kind === "removed" ? "diff-del" : "",
-      text: segment.text,
-    })
-  );
-}
-
-function reviewRow(row) {
-  return el(
-    "div",
-    { class: "row", onClick: () => (row.present ? openReviewPeek(row.id) : null) },
-    [
-      el("span", { class: "row__label", text: row.priority || "gone" }),
-      el("span", { class: "row__title", text: row.title || row.id }),
-      row.status
-        ? badge(row.status, row.status === "pending" ? "overridden" : undefined)
-        : null,
-      el("span", { class: "row__id", text: row.id }),
-      row.present
-        ? el("button", {
-            class: "row__open",
-            text: "Open",
-            onClick: (event) => {
-              event.stopPropagation();
-              openReviewPeek(row.id);
-            },
-          })
-        : null,
-    ].filter(Boolean)
-  );
+  if (!flat.length) return false;
+  const index = flat.findIndex((row) => row.id === state.selectedId);
+  if (event.key === "j" && index < flat.length - 1) {
+    selectItem(flat[index + 1].id);
+    return true;
+  }
+  if (event.key === "k" && index > 0) {
+    selectItem(flat[index - 1].id);
+    return true;
+  }
+  return false;
 }

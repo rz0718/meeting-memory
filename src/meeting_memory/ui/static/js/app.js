@@ -7,7 +7,7 @@ import { el, icon, mount, setDisplayTimezone, timezoneSuffix } from "./dom.js";
 import { basketSummary, openBasketDialog, openObjectPeek } from "./objects.js";
 import { bindQueueNavigation, openReviewPeek } from "./reviewpeek.js";
 import { handleQueueKey, queueView, selectReview } from "./queue.js";
-import { runsView } from "./runs.js";
+import { handleRunsKey, runsView } from "./runs.js";
 import {
   onChange,
   refreshBasket,
@@ -353,6 +353,7 @@ function bindKeys() {
     if (event.key === "2") return void activate(queueView);
     if (event.key === "3") return void activate(askView);
     if (activeView === queueView && handleQueueKey(event)) event.preventDefault();
+    if (activeView === runsView && handleRunsKey(event)) event.preventDefault();
   });
 }
 

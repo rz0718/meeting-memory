@@ -8,10 +8,10 @@ import {
   yTicks,
 } from "../../src/meeting_memory/ui/static/js/runs_chart.js";
 
-function run(day, count) {
+function run(day, count, sourcesProcessed = 0) {
   return {
     started_at: `2026-07-${String(day).padStart(2, "0")}T08:00:00Z`,
-    counts: { objects_created: count },
+    counts: { objects_created: count, sources_processed: sourcesProcessed },
   };
 }
 
@@ -25,13 +25,14 @@ test("chartSeries limits newest-first API runs and returns them oldest-first", (
   assert.equal(series.at(-1).date, "2026-07-31");
 });
 
-test("chartSeries exposes compact UTC dates and created-object counts", () => {
-  const [entry] = chartSeries([run(29, 7)]);
+test("chartSeries exposes compact UTC dates, created-object counts, and sources processed", () => {
+  const [entry] = chartSeries([run(29, 7, 5)]);
 
   assert.deepEqual(entry, {
     date: "2026-07-29",
     dateLabel: "Jul 29",
     count: 7,
+    sourcesProcessed: 5,
   });
 });
 
