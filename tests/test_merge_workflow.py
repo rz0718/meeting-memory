@@ -6,8 +6,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from meeting_memory.knowledge.cli import main
+from meeting_memory.knowledge.constants import (
+    GENERATED_BEGIN,
+    GENERATED_END,
+    MANUAL_BEGIN,
+    MANUAL_END,
+)
 from meeting_memory.knowledge.errors import MergeError, SchemaError
 from meeting_memory.knowledge.merge import KnowledgeMerger
 from meeting_memory.knowledge.models import Evidence, KnowledgeObject, ReviewItem
@@ -243,6 +250,80 @@ class MergeWorkflowTest(unittest.TestCase):
         self.assertEqual(before_survivor, survivor.path.read_bytes())
         self.assertEqual(before_loser, loser.path.read_bytes())
         self.assertTrue(loser.path.exists())
+
+    def test_merge_rejects_a_multiline_note_before_validation_or_mutation(self):
+        survivor = self.make_object(
+            identifier="metric-survivor",
+            title="Survivor",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-06-01",
+        )
+        loser = self.make_object(
+            identifier="metric-loser",
+            title="Loser",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-07-07",
+        )
+        before_survivor = survivor.path.read_bytes()
+        before_loser = loser.path.read_bytes()
+
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                with mock.patch.object(
+                    self.repository, "validate_all", wraps=self.repository.validate_all
+                ) as validate_all:
+                    with self.assertRaisesRegex(MergeError, "exactly one line"):
+                        self.merger().merge(
+                            "metric-loser",
+                            "metric-survivor",
+                            "rui",
+                            "Consolidating duplicates.\nInjected history entry.",
+                            dry_run=dry_run,
+                        )
+                    validate_all.assert_not_called()
+                self.assertEqual(before_survivor, survivor.path.read_bytes())
+                self.assertEqual(before_loser, loser.path.read_bytes())
+                self.assertTrue(loser.path.exists())
+
+    def test_merge_rejects_protected_markers_in_a_custom_statement_without_mutation(self):
+        survivor = self.make_object(
+            identifier="metric-survivor",
+            title="Survivor",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-06-01",
+        )
+        loser = self.make_object(
+            identifier="metric-loser",
+            title="Loser",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-07-07",
+        )
+        before_survivor = survivor.path.read_bytes()
+        before_loser = loser.path.read_bytes()
+
+        for marker in (GENERATED_BEGIN, GENERATED_END, MANUAL_BEGIN, MANUAL_END):
+            for dry_run in (True, False):
+                with self.subTest(marker=marker, dry_run=dry_run):
+                    with mock.patch.object(
+                        self.repository,
+                        "validate_all",
+                        wraps=self.repository.validate_all,
+                    ) as validate_all:
+                        with self.assertRaisesRegex(
+                            MergeError, "protected Markdown marker"
+                        ):
+                            self.merger().merge(
+                                "metric-loser",
+                                "metric-survivor",
+                                "rui",
+                                "Consolidating duplicates.",
+                                statement="Combined statement %s" % marker,
+                                dry_run=dry_run,
+                            )
+                        validate_all.assert_not_called()
+                    self.assertEqual(before_survivor, survivor.path.read_bytes())
+                    self.assertEqual(before_loser, loser.path.read_bytes())
+                    self.assertTrue(loser.path.exists())
 
     def test_merge_preflight_blocks_dangling_suggestion_before_mutation(self):
         survivor = self.make_object(

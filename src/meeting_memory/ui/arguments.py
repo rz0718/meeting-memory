@@ -147,7 +147,7 @@ def merge_arguments(request: MergeRequest, reviewer: str) -> Dict[str, Any]:
         "survivor_id": request.survivor_id,
         "reviewer": (request.reviewer or reviewer or "").strip(),
         "note": request.note,
-        "statement": (request.statement or None),
+        "statement": request.statement,
         "title": (request.title or None),
         "status": _choice(request.status, STATUSES, "status"),
         "owner": (request.owner or None),

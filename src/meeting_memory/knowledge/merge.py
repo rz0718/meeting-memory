@@ -20,7 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .constants import CONFIDENCES, STATUSES
+from .constants import (
+    CONFIDENCES,
+    GENERATED_BEGIN,
+    GENERATED_END,
+    MANUAL_BEGIN,
+    MANUAL_END,
+    STATUSES,
+)
 from .errors import MergeError
 from .indexes import generate_indexes
 from .models import Evidence, KnowledgeObject
@@ -152,10 +159,22 @@ class KnowledgeMerger:
     ) -> MergeResult:
         reviewer = reviewer.strip()
         note = note.strip()
+        if len(note.splitlines()) != 1:
+            raise MergeError("merge note must be exactly one line")
         if statement is not None:
             statement = statement.strip()
             if not statement:
                 raise MergeError("final statement may not be empty")
+            if any(
+                marker in statement
+                for marker in (
+                    GENERATED_BEGIN,
+                    GENERATED_END,
+                    MANUAL_BEGIN,
+                    MANUAL_END,
+                )
+            ):
+                raise MergeError("final statement may not contain a protected Markdown marker")
         if not reviewer:
             raise MergeError("reviewer may not be empty")
         if not note:

@@ -19,3 +19,7 @@ export function mergeRequestBody({
     allow_conflicting_numbers: Boolean(allowConflictingNumbers),
   };
 }
+
+export function shouldRestoreApply(applyVersion, draftVersion) {
+  return applyVersion === draftVersion;
+}

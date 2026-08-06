@@ -392,6 +392,19 @@ class ArgumentEquivalenceTest(unittest.TestCase):
         self.assertIsNone(arguments["owner"])
         self.assertIsNone(arguments["title"])
 
+    def test_merge_preserves_an_explicit_empty_statement_for_domain_validation(self):
+        arguments = merge_arguments(
+            MergeRequest(
+                loser_id="metric-threshold",
+                survivor_id="policy-threshold",
+                note="Same fact.",
+                statement="",
+            ),
+            "rui",
+        )
+
+        self.assertEqual("", arguments["statement"])
+
     def test_invalid_effective_date_is_rejected_like_argparse(self):
         with self.assertRaises(ValueError):
             resolver_arguments(
@@ -746,6 +759,31 @@ class MergeRouteTest(UiTestCase):
         reloaded = self.repository.load_knowledge_file(survivor.path)
         self.assertEqual(body["statement"], reloaded.statement)
         self.assertIn(body["note"], reloaded.history[-1])
+
+    def test_merge_rejects_empty_or_whitespace_statements_without_mutation(self):
+        survivor = self.make_object("project-framework")
+        loser = self.make_object("project-framework-duplicate")
+        before_survivor = survivor.path.read_bytes()
+        before_loser = loser.path.read_bytes()
+
+        for statement in ("", "   "):
+            with self.subTest(statement=repr(statement)):
+                response = self.client.post(
+                    "/api/merge",
+                    json={
+                        "loser_id": loser.id,
+                        "survivor_id": survivor.id,
+                        "note": "The same project recorded twice.",
+                        "statement": statement,
+                        "dry_run": True,
+                    },
+                )
+
+                self.assertEqual(400, response.status_code)
+                self.assertIn("final statement may not be empty", response.json()["error"])
+                self.assertEqual(before_survivor, survivor.path.read_bytes())
+                self.assertEqual(before_loser, loser.path.read_bytes())
+                self.assertTrue(loser.path.exists())
 
     def test_cross_category_merge_is_refused_until_the_override_is_ticked(self):
         survivor = self.make_object("project-framework")

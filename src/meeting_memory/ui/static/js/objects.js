@@ -9,7 +9,11 @@
 import { api } from "./api.js";
 import { calendarDate, callout, el, icon, instant, mount, property } from "./dom.js";
 import { evidenceList } from "./evidence.js";
-import { mergeRequestBody, objectStatement } from "./merge_form.js";
+import {
+  mergeRequestBody,
+  objectStatement,
+  shouldRestoreApply,
+} from "./merge_form.js";
 import { busy, closeModal, openModal, openPeek, reportError, toast } from "./ui.js";
 import { refreshBasket, refreshKnowledge, store } from "./store.js";
 
@@ -293,6 +297,7 @@ export async function openMergeDialog(loserId) {
   });
 
   applyButton.addEventListener("click", async () => {
+    const applyVersion = draftVersion;
     applyButton.disabled = true;
     try {
       const result = await api.merge({ ...body(select.value), dry_run: false });
@@ -310,7 +315,9 @@ export async function openMergeDialog(loserId) {
         }
       );
     } catch (error) {
-      applyButton.disabled = false;
+      if (shouldRestoreApply(applyVersion, draftVersion)) {
+        applyButton.disabled = false;
+      }
       reportError(error);
     }
   });

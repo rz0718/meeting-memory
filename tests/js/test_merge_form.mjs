@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   mergeRequestBody,
   objectStatement,
+  shouldRestoreApply,
 } from "../../src/meeting_memory/ui/static/js/merge_form.js";
 
 const objects = [
@@ -54,4 +55,9 @@ test("mergeRequestBody transmits IDs and both explicit override booleans", () =>
       allow_conflicting_numbers: false,
     },
   );
+});
+
+test("a failed apply is restored only while its merge draft is still current", () => {
+  assert.equal(shouldRestoreApply(3, 3), true);
+  assert.equal(shouldRestoreApply(3, 4), false);
 });
