@@ -1436,8 +1436,7 @@ pre.preview {
   background: var(--hover);
 }
 
-.merge-survivor__title,
-.merge-survivor__id {
+.merge-survivor__title {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1445,10 +1444,12 @@ pre.preview {
 }
 
 .merge-survivor__id {
+  display: block;
   margin-top: 2px;
   color: var(--ink-muted);
   font-family: var(--font-mono);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .merge-survivor__empty {
