@@ -511,7 +511,7 @@ export async function openBasketDialog() {
       basket.count
         ? el("button", {
             class: "btn",
-            text: "Clear",
+            text: "Put back",
             onClick: async () => {
               await api.basketClear();
               closeModal();
