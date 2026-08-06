@@ -1380,6 +1380,28 @@ pre.preview {
   line-height: 1.5;
 }
 
+.merge-statements {
+  margin: 0;
+}
+
+.merge-statement-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+@media (max-width: 640px) {
+  .merge-statements {
+    grid-template-columns: 1fr;
+  }
+
+  .merge-statements .compare__col + .compare__col {
+    border-top: 1px solid var(--divider);
+    border-left: 0;
+  }
+}
+
 /* -- ask ------------------------------------------------------------------ */
 
 .ask__form {

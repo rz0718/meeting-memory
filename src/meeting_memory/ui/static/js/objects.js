@@ -9,6 +9,7 @@
 import { api } from "./api.js";
 import { calendarDate, callout, el, icon, instant, mount, property } from "./dom.js";
 import { evidenceList } from "./evidence.js";
+import { mergeRequestBody, objectStatement } from "./merge_form.js";
 import { busy, closeModal, openModal, openPeek, reportError, toast } from "./ui.js";
 import { refreshBasket, refreshKnowledge, store } from "./store.js";
 
@@ -140,59 +141,149 @@ export async function openMergeDialog(loserId) {
   const candidates = store.knowledge.filter((value) => value.id !== loserId);
   const loser = store.knowledge.find((value) => value.id === loserId);
 
+  if (!loser) {
+    openModal({
+      title: `Merge ${loserId}`,
+      body: callout(
+        "danger",
+        "Knowledge object not found",
+        `${loserId} is no longer available. Refresh the knowledge list before trying again.`
+      ),
+      actions: [el("button", { class: "btn", onClick: closeModal, text: "Close" })],
+    });
+    return;
+  }
+
   const search = el("input", { placeholder: "Filter by ID or title…", class: "" });
   const select = el("select", { size: 8, style: "width:100%" });
   const note = el("textarea", { placeholder: "Why these two records are one fact…" });
+  const retiringStatement = objectStatement(store.knowledge, loserId);
+  const survivorStatement = el("div", { class: "compare__text" });
+  const finalStatement = el("textarea", {
+    required: true,
+    placeholder: "The canonical statement after this merge…",
+  });
   const crossCategory = el("input", { type: "checkbox" });
   const conflictingNumbers = el("input", { type: "checkbox" });
   const output = el("div", {});
-
-  const fill = () => {
-    const needle = search.value.trim().toLowerCase();
-    mount(
-      select,
-      candidates
-        .filter(
-          (value) =>
-            !needle ||
-            value.id.toLowerCase().includes(needle) ||
-            value.title.toLowerCase().includes(needle)
-        )
-        .slice(0, 300)
-        .map((value) =>
-          el("option", { value: value.id, text: `${value.title} — ${value.id}` })
-        )
-    );
-  };
-  search.addEventListener("input", fill);
-  fill();
 
   const applyButton = el(
     "button",
     { class: "btn btn--primary", disabled: true },
     [icon("check"), el("span", { text: "Apply merge" })]
   );
-
-  const body = (survivorId) => ({
-    loser_id: loserId,
-    survivor_id: survivorId,
-    note: note.value,
-    allow_cross_category: crossCategory.checked,
-    allow_conflicting_numbers: conflictingNumbers.checked,
-  });
-
   const previewButton = el("button", { class: "btn" }, [
     icon("doc"),
     el("span", { text: "Preview merge" }),
   ]);
-  previewButton.addEventListener("click", async () => {
+  const useSurvivor = el("button", {
+    class: "btn",
+    type: "button",
+    text: "Use survivor",
+  });
+  const useRetiring = el("button", {
+    class: "btn",
+    type: "button",
+    text: "Use retiring",
+  });
+  let draftVersion = 0;
+
+  const invalidatePreview = () => {
+    draftVersion += 1;
     applyButton.disabled = true;
+    mount(output);
+  };
+
+  const updateSelectedSurvivor = ({ invalidate = true } = {}) => {
+    const selectedStatement = objectStatement(store.knowledge, select.value);
+    survivorStatement.textContent = selectedStatement || "No survivor selected.";
+    survivorStatement.classList.toggle("secondary", !selectedStatement);
+    finalStatement.value = selectedStatement;
+    finalStatement.setCustomValidity("");
+    useSurvivor.disabled = !select.value;
+    if (invalidate) invalidatePreview();
+  };
+
+  const fill = ({ initial = false } = {}) => {
+    const previousId = select.value;
+    const needle = search.value.trim().toLowerCase();
+    const matches = candidates
+      .filter(
+        (value) =>
+          !needle ||
+          value.id.toLowerCase().includes(needle) ||
+          value.title.toLowerCase().includes(needle)
+      )
+      .slice(0, 300);
+    mount(
+      select,
+      matches.length
+        ? matches.map((value) =>
+            el("option", { value: value.id, text: `${value.title} — ${value.id}` })
+          )
+        : el("option", {
+            disabled: true,
+            value: "",
+            text: candidates.length
+              ? "No matching knowledge objects"
+              : "No other knowledge objects available",
+          })
+    );
+    if (matches.some((value) => value.id === previousId)) select.value = previousId;
+    const selectionChanged = select.value !== previousId;
+    previewButton.disabled = !select.value;
+    if (selectionChanged || initial) {
+      updateSelectedSurvivor({ invalidate: !initial });
+    }
+  };
+
+  search.addEventListener("input", () => fill());
+  select.addEventListener("change", () => updateSelectedSurvivor());
+  note.addEventListener("input", invalidatePreview);
+  finalStatement.addEventListener("input", () => {
+    finalStatement.setCustomValidity("");
+    invalidatePreview();
+  });
+  crossCategory.addEventListener("change", invalidatePreview);
+  conflictingNumbers.addEventListener("change", invalidatePreview);
+  useSurvivor.addEventListener("click", () => {
+    finalStatement.value = objectStatement(store.knowledge, select.value);
+    finalStatement.setCustomValidity("");
+    invalidatePreview();
+  });
+  useRetiring.addEventListener("click", () => {
+    finalStatement.value = retiringStatement;
+    finalStatement.setCustomValidity("");
+    invalidatePreview();
+  });
+  fill({ initial: true });
+
+  const body = (survivorId) => mergeRequestBody({
+    loserId,
+    survivorId,
+    note: note.value,
+    statement: finalStatement.value,
+    allowCrossCategory: crossCategory.checked,
+    allowConflictingNumbers: conflictingNumbers.checked,
+  });
+
+  previewButton.addEventListener("click", async () => {
+    if (!select.value) return;
+    if (!finalStatement.value.trim()) {
+      finalStatement.setCustomValidity("Final statement is required.");
+      finalStatement.reportValidity();
+      return;
+    }
+    invalidatePreview();
+    const previewVersion = draftVersion;
     mount(output, busy("Running deterministic dry run…"));
     try {
       const result = await api.merge({ ...body(select.value), dry_run: true });
+      if (previewVersion !== draftVersion) return;
       mount(output, mergePreview(result.preview));
       applyButton.disabled = false;
     } catch (error) {
+      if (previewVersion !== draftVersion) return;
       mount(output, el("div", { class: "callout callout--danger" }, [
         icon("alert"),
         el("div", { class: "callout__body", text: `${error.type}: ${error.message}` }),
@@ -230,10 +321,30 @@ export async function openMergeDialog(loserId) {
       el("div", { class: "secondary" }, [
         el("span", { text: "Retiring " }),
         el("span", { class: "mono", text: loserId }),
-        el("span", { text: loser ? ` (${loser.category})` : "" }),
+        el("span", { text: ` (${loser.category})` }),
       ]),
       el("div", { class: "props" }, [
         ...property("Keep (survivor)", el("div", {}, [search, select])),
+        ...property(
+          "Source statements",
+          el("div", { class: "compare merge-statements" }, [
+            el("div", { class: "compare__col" }, [
+              el("div", { class: "compare__head", text: "Retiring" }),
+              el("div", { class: "compare__text", text: retiringStatement }),
+            ]),
+            el("div", { class: "compare__col" }, [
+              el("div", { class: "compare__head", text: "Selected survivor" }),
+              survivorStatement,
+            ]),
+          ])
+        ),
+        ...property(
+          "Final statement",
+          el("div", {}, [
+            finalStatement,
+            el("div", { class: "merge-statement-actions" }, [useSurvivor, useRetiring]),
+          ])
+        ),
         ...property("Reviewer", store.session ? store.session.reviewer : ""),
         ...property("Note", note),
         ...property(
@@ -279,6 +390,16 @@ function mergePreview(preview) {
             `${preview.retargeted_review_ids.length} reviews and ` +
             `${preview.retargeted_object_ids.length} related objects retargeted.`,
         }),
+      ]),
+    ]),
+    el("div", { class: "compare merge-statements" }, [
+      el("div", { class: "compare__col" }, [
+        el("div", { class: "compare__head", text: "Survivor before" }),
+        el("div", { class: "compare__text", text: preview.before?.statement || "" }),
+      ]),
+      el("div", { class: "compare__col" }, [
+        el("div", { class: "compare__head", text: "Final statement" }),
+        el("div", { class: "compare__text", text: preview.after?.statement || "" }),
       ]),
     ]),
     el("pre", { class: "preview", text: JSON.stringify(preview, null, 2) }),
