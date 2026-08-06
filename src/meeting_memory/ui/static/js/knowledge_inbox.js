@@ -18,11 +18,24 @@ export function objectCount(groups) {
   return groups.reduce((total, group) => total + group.rows.length, 0);
 }
 
-export function reviewCandidateCount(detail) {
+export function reviewCandidateRows(detail) {
   const group = detail.groups.find(
     (entry) => entry.bucket === "review_items_created",
   );
-  return group ? group.rows.length : 0;
+  return group ? group.rows : [];
+}
+
+export function reviewCandidateCount(detail) {
+  return reviewCandidateRows(detail).length;
+}
+
+// What the run queued is history; what can still be worked is not. A case that
+// has been resolved, rejected, or deleted since is no longer in the queue, so
+// only a pending one has anywhere to open.
+export function openReviewIds(detail) {
+  return reviewCandidateRows(detail)
+    .filter((row) => row.present && row.status === "pending")
+    .map((row) => row.id);
 }
 
 export function matchesFilter(row, { search = "", category = "" } = {}) {

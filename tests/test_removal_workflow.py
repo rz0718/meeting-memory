@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from meeting_memory.knowledge.errors import SchemaError
 from meeting_memory.knowledge.models import Evidence, KnowledgeObject, ReviewItem
 from meeting_memory.knowledge.cli import main
 from meeting_memory.knowledge.removal import KnowledgeRemover
@@ -137,6 +138,41 @@ class RemovalWorkflowTest(unittest.TestCase):
             json.loads(manifest.read_text(encoding="utf-8"))["inventory_sha256"],
         )
         self.repository.validate_all()
+
+    def write_dangling_suggestion_manifest(self):
+        manifest = {
+            "schema_version": "1",
+            "run_type": "review_suggestions",
+            "run_id": "review-run-dangling",
+            "started_at": "2026-07-29T12:40:57Z",
+            "completed_at": "2026-07-29T12:41:04Z",
+            "status": "success",
+            "model": "test/model",
+            "prompt_version": "1",
+            "filters": {},
+            "requested_review_ids": ["review-dangling"],
+            "suggestions_created": {"review-dangling": "suggestion-missing"},
+            "suggestions_reused": {},
+            "failures": [],
+        }
+        path = self.repository.review_run_dir / "review-run-dangling.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_removal_preflight_blocks_dangling_suggestion_before_mutation(self):
+        removed = self.make_object("system-remove")
+        before = removed.path.read_bytes()
+        self.write_dangling_suggestion_manifest()
+
+        with self.assertRaises(SchemaError):
+            self.remover().remove(
+                [removed.id], "Rui", "TreasuryBot cleanup.", dry_run=True
+            )
+        self.assertEqual(before, removed.path.read_bytes())
+
+        with self.assertRaises(SchemaError):
+            self.remover().remove([removed.id], "Rui", "TreasuryBot cleanup.")
+        self.assertEqual(before, removed.path.read_bytes())
+        self.assertFalse((self.repository.state_dir / "cleanup-runs").exists())
 
     def test_cli_requires_matching_count_and_inventory_digest(self):
         removed = self.make_object("system-remove")

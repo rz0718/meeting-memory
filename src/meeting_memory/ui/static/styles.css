@@ -904,6 +904,25 @@ h2.section {
   text-decoration: underline;
 }
 
+/* Nothing left to open, so it reads as a fact about the run rather than a way
+   into the queue. */
+.inbox__review-closed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.inbox__review-note {
+  color: var(--ink-muted);
+  font-weight: 400;
+}
+
+.inbox__review-note::before {
+  content: "· ";
+}
+
 .inbox__error-warning {
   display: inline-flex;
   align-items: center;
@@ -932,9 +951,67 @@ h2.section {
   border-radius: 0;
 }
 
-.inbox__item:disabled {
-  cursor: default;
-  opacity: 0.55;
+/* A group that has lost objects splits into labelled halves, so its own count
+   decomposes in place: Created 15 is Live 1 plus Removed 14. Smaller and
+   upper-case to sit a level below the group heading it divides. */
+.inbox__subgroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--divider);
+  background: none;
+  padding: 6px 12px;
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background var(--motion);
+}
+
+.inbox__subgroup:hover {
+  background: var(--hover);
+}
+
+.inbox__subgroup .icon {
+  transition: transform var(--motion);
+}
+
+.inbox__subgroup[aria-expanded="false"] .icon {
+  transform: rotate(-90deg);
+}
+
+.inbox__subgroup--removed {
+  color: var(--ink-muted);
+}
+
+/* A removed object leaves only its ID. One quiet line keeps the run's record of
+   it without dressing it up as something the reader can open. */
+.inbox__tombstone {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 4px 26px;
+  color: var(--ink-muted);
+}
+
+.inbox__tombstone .icon {
+  flex: none;
+  opacity: 0.6;
+}
+
+.inbox__tombstone-id {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-decoration: line-through;
 }
 
 .inbox__item-outcome {
@@ -989,12 +1066,75 @@ h2.section {
   font-variant-numeric: tabular-nums;
 }
 
-.run-details-mount {
-  border-top: 1px solid var(--divider);
-  padding: 4px 20px 40px;
+.inbox__run-details-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ink-secondary);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.inbox__run-details-toggle:hover {
+  color: var(--ink);
+}
+
+.inbox__run-details-toggle .icon {
+  transition: transform var(--motion);
+}
+
+.inbox__run-details-toggle[aria-expanded="false"] .icon {
+  transform: rotate(-90deg);
+}
+
+/* Empty until the header toggle opens it, so the split keeps its full height
+   by default and the borders below collapse away with it. */
+.run-details-mount:not(:empty) {
+  border-bottom: 1px solid var(--divider);
+  padding: 4px 20px 16px;
+  overflow: auto;
+}
+
+/* Fills .content's full height so the list and reader panes below get a
+   bounded height and can each scroll independently, instead of the page's
+   single outer scrollbar dragging the reader pane out of view while
+   scrolling a long list. */
+.inbox-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.inbox-shell .inbox__header,
+.inbox-shell .run-details-mount {
+  flex: none;
+}
+
+/* The panel gives up height before the split does, so opening it on a short
+   viewport never squeezes the list and reader out of usable size. */
+.inbox-shell .run-details-mount:not(:empty) {
+  max-height: 45%;
+}
+
+.inbox-shell .split {
+  flex: 1;
+  min-height: 0;
 }
 
 @media (max-width: 900px) {
+  .inbox-shell {
+    height: auto;
+  }
+
+  .inbox-shell .split {
+    flex: none;
+  }
+
   .split:has(.inbox__list) {
     flex-direction: column;
     height: auto;

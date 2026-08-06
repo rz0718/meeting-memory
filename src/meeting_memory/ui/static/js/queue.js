@@ -17,7 +17,7 @@ import {
   suggestionComment,
 } from "./reviewview.js";
 import { busy, empty, openModal, closeModal, reportError, toast } from "./ui.js";
-import { setReviewCounts } from "./store.js";
+import { refreshAfterKnowledgeChange, setReviewCounts } from "./store.js";
 
 const ACTIONS = [
   "refine",
@@ -934,26 +934,41 @@ function previewBlock(value, form, preview) {
 
 async function applyDecision(value, form, button) {
   button.disabled = true;
+  let result;
   try {
-    const result = await api.resolve(value.id, resolveBody(form, false));
-    const applied = result.applied;
-    toast(
-      `Applied ${applied.review_id} as ${applied.action} → ${applied.destination_status}, ` +
-        `recorded ${result.will_record.disposition} (${result.will_record.mode}).`,
-      {
-        kind: "good",
-        link: result.resolution
-          ? {
-              label: `Open audit record: ${result.resolution.file_path}`,
-              action: () => window.open(`#${result.resolution.file_path}`, "_self"),
-            }
-          : null,
-      }
-    );
+    result = await api.resolve(value.id, resolveBody(form, false));
+  } catch (error) {
+    button.disabled = false;
+    reportError(error);
+    return;
+  }
+
+  const applied = result.applied;
+  toast(
+    `Applied ${applied.review_id} as ${applied.action} → ${applied.destination_status}, ` +
+      `recorded ${result.will_record.disposition} (${result.will_record.mode}).`,
+    {
+      kind: "good",
+      link: result.resolution
+        ? {
+            label: `Open audit record: ${result.resolution.file_path}`,
+            action: () => window.open(`#${result.resolution.file_path}`, "_self"),
+          }
+        : null,
+    }
+  );
+
+  // Past this point the resolution has committed. Resolving writes canonical
+  // objects -- created, refined, or reconfirmed -- so the corpus the rest of the
+  // session reads from is now behind, and the runs view refreshes with it when
+  // it is the one on screen. A failure catching up is reported on its own and
+  // never re-enables Apply: re-running a resolution that already landed is worse
+  // than a stale read, and the next activation reloads either way.
+  try {
+    await refreshAfterKnowledgeChange();
     advanceToNext();
     if (state.context) await queueView.render(state.context);
   } catch (error) {
-    button.disabled = false;
     reportError(error);
   }
 }

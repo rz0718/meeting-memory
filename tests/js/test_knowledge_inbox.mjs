@@ -6,6 +6,7 @@ import {
   COLLAPSED_BY_DEFAULT,
   inboxGroups,
   objectCount,
+  openReviewIds,
   reviewCandidateCount,
   matchesFilter,
   filterGroups,
@@ -81,6 +82,45 @@ test("reviewCandidateCount is zero when there is no review bucket", () => {
   });
 
   assert.equal(reviewCandidateCount(detail), 0);
+});
+
+test("openReviewIds keeps only cases still pending in the queue", () => {
+  const detail = detailFixture({
+    groups: [
+      group("review_items_created", "Sent to review", [
+        row("v1", { status: "pending" }),
+        row("v2", { status: "resolved" }),
+        row("v3", { status: "rejected" }),
+        row("v4", { present: false, status: null }),
+        row("v5", { status: "pending" }),
+      ]),
+    ],
+  });
+
+  assert.deepEqual(openReviewIds(detail), ["v1", "v5"]);
+  assert.equal(reviewCandidateCount(detail), 5);
+});
+
+test("openReviewIds is empty when every case the run queued has gone", () => {
+  const detail = detailFixture({
+    groups: [
+      group("review_items_created", "Sent to review", [
+        row("v1", { present: false, status: null }),
+        row("v2", { status: "resolved" }),
+      ]),
+    ],
+  });
+
+  assert.deepEqual(openReviewIds(detail), []);
+  assert.equal(reviewCandidateCount(detail), 2);
+});
+
+test("openReviewIds is empty when there is no review bucket", () => {
+  const detail = detailFixture({
+    groups: [group("objects_created", "Created", [row("c1")])],
+  });
+
+  assert.deepEqual(openReviewIds(detail), []);
 });
 
 test("matchesFilter matches case-insensitively on title and statement", () => {

@@ -72,6 +72,12 @@ class KnowledgeRemover:
             raise RemovalError("reviewer may not be empty")
         if not note:
             raise RemovalError("removal note may not be empty")
+        # Preflight, as merge does: the sweep after the commit can only report a
+        # repository that is already inconsistent for some unrelated reason, and
+        # by then the objects are gone -- the caller sees a failure for work that
+        # succeeded and cannot tell the two apart. Validating first means a
+        # corrupt repository refuses the removal at preview, before any deletion.
+        self.repository.validate_all()
 
         objects = self.repository.load_knowledge()
         by_id = {item.id: item for item in objects}

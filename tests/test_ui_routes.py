@@ -426,6 +426,21 @@ class RunRoutesTest(UiTestCase):
         self.assertEqual(1, payload["runs"][0]["counts"]["objects_created"])
         self.assertEqual(["2026-07-29", "2026-07-28"], payload["dates"])
 
+    def test_static_assets_must_be_revalidated(self):
+        """The front end is an ES module graph: one stale asset breaks them all."""
+        response = self.client.get("/static/js/knowledge_inbox.js")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("no-cache", response.headers.get("cache-control"))
+
+        revalidated = self.client.get(
+            "/static/js/knowledge_inbox.js",
+            headers={"If-None-Match": response.headers["etag"]},
+        )
+        self.assertEqual(304, revalidated.status_code)
+        self.assertEqual("no-cache", revalidated.headers.get("cache-control"))
+        self.assertEqual("no-cache", self.client.get("/").headers.get("cache-control"))
+
     def test_runs_list_filters_by_run_start_date(self):
         self.make_run_manifest("20260728T080000Z", started_at="2026-07-28T08:00:00Z",
                                completed_at="2026-07-28T08:04:00Z")

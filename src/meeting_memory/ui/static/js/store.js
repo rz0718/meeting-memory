@@ -41,6 +41,21 @@ export async function refreshBasket() {
   return store.basket;
 }
 
+// A merge or a removal changes which knowledge objects still exist, and the
+// runs view holds its own copy of the run detail that records exactly that per
+// row. It registers here to be told, so a mutation site does not have to import
+// the view -- the same injection the queue uses for navigation.
+let runDetailRefresher = null;
+
+export function bindRunDetailRefresh(refresher) {
+  runDetailRefresher = refresher;
+}
+
+export async function refreshAfterKnowledgeChange() {
+  await refreshKnowledge();
+  if (runDetailRefresher) await runDetailRefresher();
+}
+
 export function setReviewCounts(counts, pending) {
   store.reviewCounts = counts;
   store.pendingReviewCount = pending;

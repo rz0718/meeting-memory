@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..knowledge.errors import (
@@ -42,6 +42,25 @@ from .service import UiService
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+class RevalidatedStatic(StaticFiles):
+    """Serve the UI's own assets with revalidation forced.
+
+    StaticFiles sends ETag and Last-Modified but no Cache-Control, which leaves
+    the browser free to apply heuristic freshness and skip revalidating. The
+    front end is a graph of ES modules, so one asset served from cache while its
+    neighbours are re-fetched links a fresh module against a stale copy of one
+    it imports. The import fails, and a failed import takes down the whole
+    graph -- including the shell -- for a blank page and no clue in the network
+    log beyond a few 304s. no-cache keeps the cheap 304 round trip and drops the
+    guessing.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 # Ordered most specific first; the first matching class wins.
 ERROR_STATUS = (
@@ -117,11 +136,14 @@ def create_app(
 
     if STATIC_DIR.is_dir():
         app.mount(
-            "/static", StaticFiles(directory=str(STATIC_DIR)), name="static"
+            "/static", RevalidatedStatic(directory=str(STATIC_DIR)), name="static"
         )
 
         @app.get("/", include_in_schema=False)
         def index() -> FileResponse:
-            return FileResponse(str(STATIC_DIR / "index.html"))
+            return FileResponse(
+                str(STATIC_DIR / "index.html"),
+                headers={"Cache-Control": "no-cache"},
+            )
 
     return app

@@ -17,7 +17,12 @@ import {
   shouldRestoreApply,
 } from "./merge_form.js";
 import { busy, closeModal, openModal, openPeek, reportError, toast } from "./ui.js";
-import { refreshBasket, refreshKnowledge, store } from "./store.js";
+import {
+  refreshAfterKnowledgeChange,
+  refreshBasket,
+  refreshKnowledge,
+  store,
+} from "./store.js";
 
 export async function openObjectPeek(objectId) {
   openPeek(objectId, busy("Loading knowledge object…"));
@@ -431,7 +436,7 @@ export async function openMergeDialog(loserId) {
     try {
       const result = await api.merge({ ...body(survivorId), dry_run: false });
       closeModal();
-      await refreshKnowledge();
+      await refreshAfterKnowledgeChange();
       toast(
         `Merged ${result.applied.loser_id} into ${result.applied.survivor_id}; ` +
           `${result.applied.evidence_added} evidence entries added.`,
@@ -586,7 +591,7 @@ export async function openBasketDialog() {
         inventory_sha256: approved.inventory_sha256,
       });
       closeModal();
-      await refreshKnowledge();
+      await refreshAfterKnowledgeChange();
       await refreshBasket();
       toast(
         `Removed ${result.applied.object_ids.length} canonical objects. ` +

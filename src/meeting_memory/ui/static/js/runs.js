@@ -9,7 +9,7 @@
 // news under its own restatements.
 
 import { api } from "./api.js";
-import { el, icon, instant, mount, statusCue, timezoneSuffix } from "./dom.js";
+import { el, icon, mount, statusCue, timezoneSuffix } from "./dom.js";
 import {
   COLLAPSED_BY_DEFAULT,
   ORDINARY_BUCKETS,
@@ -17,13 +17,14 @@ import {
   filterGroups,
   inboxGroups,
   objectCount,
+  openReviewIds,
   reviewCandidateCount,
 } from "./knowledge_inbox.js";
 import { objectView } from "./objects.js";
 import { openQueueCase } from "./reviewpeek.js";
 import { chartSeries, fullDateLabel, pointX, yTicks } from "./runs_chart.js";
 import { busy, empty, reportError } from "./ui.js";
-import { emit } from "./store.js";
+import { bindRunDetailRefresh, emit } from "./store.js";
 
 const state = {
   runs: null,
@@ -34,6 +35,7 @@ const state = {
   expanded: Object.fromEntries(
     ORDINARY_BUCKETS.map((bucket) => [bucket, !COLLAPSED_BY_DEFAULT.has(bucket)])
   ),
+  subsections: {},
   runDetailsOpen: false,
 };
 
@@ -79,6 +81,40 @@ export const runsView = {
     }
   },
 };
+
+// Re-fetch the run the view is showing, without the full reload render() does:
+// a merge or removal only changes which rows are still present, so the run
+// selection, the filters, and the open state of Run details all survive it. The
+// reader keeps its place unless the object it was showing is the one that went.
+async function refreshRunDetail() {
+  // The peek that starts a merge can be opened from another tab, and the content
+  // node belongs to whichever view is mounted in it, so only touch the DOM while
+  // this view still owns it. Nothing goes stale by skipping: render() re-fetches
+  // on every activation anyway.
+  if (!currentCtx || !state.detail || !document.querySelector(".inbox-shell")) {
+    return;
+  }
+  let detail;
+  try {
+    detail = await api.run(state.runId);
+  } catch (error) {
+    reportError(error);
+    return;
+  }
+  state.detail = detail;
+  chartNode = null;
+  const groups = filterGroups(inboxGroups(detail), state.filters);
+  const readable = groups.some((group) =>
+    group.rows.some((row) => row.id === state.selectedId && row.present)
+  );
+  if (!readable) state.selectedId = defaultSelectionId(groups);
+  mount(currentCtx.content, page());
+  renderList();
+  renderReader();
+  emit();
+}
+
+bindRunDetailRefresh(refreshRunDetail);
 
 // -- filter bar ---------------------------------------------------------------
 
@@ -175,21 +211,23 @@ function filterBar(ctx) {
 // -- page shell -----------------------------------------------------------
 
 function page() {
-  return el("div", {}, [
-    inboxHeader(),
-    el("div", { class: "split" }, [
-      el("div", { class: "queue inbox__list" }),
-      el("div", { class: "inbox__reader-pane" }, [
-        el(
-          "button",
-          { class: "inbox__back", onClick: () => setMobileReaderOpen(false) },
-          [el("span", { text: "← Back to knowledge list" })]
-        ),
-        el("div", { class: "detail inbox__reader" }),
+  return [
+    el("div", { class: "inbox-shell" }, [
+      inboxHeader(),
+      el("div", { class: "run-details-mount" }, [buildRunDetailsSection()]),
+      el("div", { class: "split" }, [
+        el("div", { class: "queue inbox__list" }),
+        el("div", { class: "inbox__reader-pane" }, [
+          el(
+            "button",
+            { class: "inbox__back", onClick: () => setMobileReaderOpen(false) },
+            [el("span", { text: "← Back to knowledge list" })]
+          ),
+          el("div", { class: "detail inbox__reader" }),
+        ]),
       ]),
     ]),
-    el("div", { class: "run-details-mount" }, [buildRunDetailsSection()]),
-  ]);
+  ];
 }
 
 function setMobileReaderOpen(open) {
@@ -212,10 +250,6 @@ function inboxHeader() {
   return el("div", { class: "inbox__header" }, [
     el("div", { class: "page-title", text: fullDateLabel(summary.started_at) }),
     el("div", { class: "page-sub" }, [
-      instant(summary.started_at),
-      el("span", { text: " → " }),
-      instant(summary.completed_at, { withDate: false }),
-      el("span", { text: "  " }),
       runStatus,
       el("span", {
         text: `  ·  meeting dates ${summary.target_dates[0] || "—"}–${
@@ -231,21 +265,7 @@ function inboxHeader() {
           class: "inbox__object-count",
           text: `${total} knowledge object${total === 1 ? "" : "s"}`,
         }),
-        reviewCount
-          ? el(
-              "a",
-              {
-                href: "#",
-                class: "inbox__review-link",
-                onClick: (event) => {
-                  event.preventDefault();
-                  const id = firstReviewCandidateId();
-                  if (id) openQueueCase(id);
-                },
-              },
-              [el("span", { text: `${reviewCount} sent to review` }), icon("chevronRight")]
-            )
-          : null,
+        reviewCount ? reviewLink(reviewCount, openReviewIds(state.detail)) : null,
         counts.errors
           ? el(
               "button",
@@ -253,19 +273,63 @@ function inboxHeader() {
               [
                 icon("alert"),
                 el("span", {
-                  text: `${counts.errors} run error${counts.errors === 1 ? "" : "s"} — see Run details`,
+                  text: `${counts.errors} run error${counts.errors === 1 ? "" : "s"}`,
                 }),
               ]
             )
           : null,
+        runDetailsToggle(),
       ].filter(Boolean)
     ),
   ]);
 }
 
-function firstReviewCandidateId() {
-  const group = state.detail.groups.find((entry) => entry.bucket === "review_items_created");
-  return group && group.rows.length ? group.rows[0].id : null;
+// Lives in the header rather than at the foot of the page: the run stats
+// describe the run the whole view is already scoped to, so they belong next to
+// the run identity instead of a screen below the split.
+function runDetailsToggle() {
+  return el(
+    "button",
+    {
+      class: "inbox__run-details-toggle",
+      "aria-expanded": state.runDetailsOpen ? "true" : "false",
+      onClick: () => setRunDetailsOpen(!state.runDetailsOpen),
+    },
+    [icon("chevron"), el("span", { text: "Run details" })]
+  );
+}
+
+// "N sent to review" is the run's record of what it queued, not a live count:
+// those cases may since have been resolved, rejected, or deleted outright. The
+// queue lists pending cases, so linking into it when none are still pending
+// lands on an empty page. Say how many can still be worked, and only offer the
+// link when one can.
+function reviewLink(total, openIds) {
+  const label = el("span", { text: `${total} sent to review` });
+  const note = (text) => el("span", { class: "inbox__review-note", text });
+
+  if (!openIds.length) {
+    return el("span", { class: "inbox__review-closed" }, [
+      label,
+      note("none still open"),
+    ]);
+  }
+  return el(
+    "a",
+    {
+      href: "#",
+      class: "inbox__review-link",
+      onClick: (event) => {
+        event.preventDefault();
+        openQueueCase(openIds[0]);
+      },
+    },
+    [
+      label,
+      openIds.length < total ? note(`${openIds.length} still open`) : null,
+      icon("chevronRight"),
+    ].filter(Boolean)
+  );
 }
 
 // -- knowledge list ---------------------------------------------------------
@@ -292,7 +356,31 @@ function listEmptyState() {
 
 function listGroupNode(group) {
   const open = state.expanded[group.bucket] !== false;
-  const rows = el("div", {}, group.rows.map((row) => listItemNode(row, group)));
+  const live = group.rows.filter((row) => row.present);
+  const removed = group.rows.filter((row) => !row.present);
+  // Only split a group that has actually lost something. On the ordinary path
+  // a "Live" heading above every group is noise, and the group's own count
+  // already says all there is to say.
+  const rows = el(
+    "div",
+    {},
+    removed.length
+      ? [
+          subsectionNode(
+            group,
+            "live",
+            "Live",
+            live.map((row) => listItemNode(row, group))
+          ),
+          subsectionNode(
+            group,
+            "removed",
+            "Removed",
+            removed.map((row) => tombstoneNode(row))
+          ),
+        ]
+      : live.map((row) => listItemNode(row, group))
+  );
   rows.hidden = !open;
 
   const toggle = el(
@@ -315,28 +403,65 @@ function listGroupNode(group) {
   return el("div", { class: "queue__group" }, [toggle, rows]);
 }
 
+// Labelled halves let the group's own count decompose in place -- Created 15 is
+// Live 1 plus Removed 14 -- instead of a sentence explaining the arithmetic, and
+// they use the same "Label N" shape as the group heading above them. Live opens
+// by default; Removed stays shut until asked for.
+function subsectionNode(group, kind, label, children) {
+  const key = `${group.bucket}:${kind}`;
+  const open = state.subsections[key] ?? kind === "live";
+  const body = el("div", {}, children);
+  body.hidden = !open;
+
+  const toggle = el(
+    "button",
+    {
+      class: `inbox__subgroup inbox__subgroup--${kind}`,
+      "aria-expanded": open ? "true" : "false",
+      onClick: () => {
+        state.subsections[key] = body.hidden;
+        body.hidden = !body.hidden;
+        toggle.setAttribute("aria-expanded", body.hidden ? "false" : "true");
+      },
+    },
+    [
+      icon("chevron"),
+      el("span", { text: label }),
+      el("span", { class: "group-toggle__count", text: String(children.length) }),
+    ]
+  );
+  return el("div", {}, [toggle, body]);
+}
+
 function listItemNode(row, group) {
   return el(
     "button",
     {
       class: `queue__item inbox__item${row.id === state.selectedId ? " is-active" : ""}`,
-      disabled: !row.present,
       onClick: () => selectItem(row.id),
     },
     [
-      el(
-        "div",
-        { class: "queue__item-meta" },
-        [
-          el("span", { text: row.category || "—" }),
-          el("span", { class: "inbox__item-outcome", text: group.label }),
-          row.present ? null : statusCue("muted", "no longer present"),
-        ].filter(Boolean)
-      ),
-      el("div", { class: "queue__item-title", text: row.title || row.id }),
+      el("div", { class: "queue__item-meta" }, [
+        el("span", { text: row.category || "—" }),
+        el("span", { class: "inbox__item-outcome", text: group.label }),
+      ]),
+      el("div", { class: "queue__item-title", text: row.title }),
       el("div", { class: "inbox__item-preview", text: row.statement || "" }),
     ]
   );
+}
+
+// Removal takes the title, category, and statement with it and leaves only the
+// ID, so the ordinary row shape renders a bare slug in the title slot and an
+// empty preview beneath it -- three lines that look like a knowledge object you
+// could open. Reader navigation already skips absent rows, so it never was one.
+// All that is left to show is the ID, and the disclosure above already says
+// these are removed.
+function tombstoneNode(row) {
+  return el("div", { class: "inbox__tombstone" }, [
+    icon("trash"),
+    el("span", { class: "inbox__tombstone-id", text: row.id, title: row.id }),
+  ]);
 }
 
 // -- knowledge reader ---------------------------------------------------------
@@ -560,10 +685,14 @@ function sourceSummary(counts, unchanged) {
 }
 
 function openRunDetails() {
-  state.runDetailsOpen = true;
+  setRunDetailsOpen(true);
+}
+
+function setRunDetailsOpen(open) {
+  state.runDetailsOpen = open;
+  const toggle = document.querySelector(".inbox__run-details-toggle");
+  if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
   renderRunDetails();
-  const node = document.querySelector(".run-details-mount");
-  if (node) node.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function renderRunDetails() {
@@ -573,17 +702,16 @@ function renderRunDetails() {
 }
 
 function buildRunDetailsSection() {
-  const summary = state.detail.summary;
-  const counts = summary.counts;
+  if (!state.runDetailsOpen) return null;
+
+  const counts = state.detail.summary.counts;
   const unchanged =
     counts.sources_skipped ?? counts.sources_examined - counts.sources_processed;
-  const open = state.runDetailsOpen;
+  if (!chartNode) chartNode = knowledgeChart(state.runs.runs);
 
-  if (open && !chartNode) chartNode = knowledgeChart(state.runs.runs);
-
-  const body = el(
-    "div",
-    {},
+  return el(
+    "section",
+    { class: "run-details" },
     [
       el("div", { class: "stat-row" }, [
         statTile("Created", counts.objects_created),
@@ -614,25 +742,9 @@ function buildRunDetailsSection() {
             ]),
           ])
         : null,
-      open && chartNode ? chartNode : null,
+      chartNode,
     ].filter(Boolean)
   );
-  body.hidden = !open;
-
-  const toggle = el(
-    "button",
-    {
-      class: "group-toggle",
-      "aria-expanded": open ? "true" : "false",
-      onClick: () => {
-        state.runDetailsOpen = !state.runDetailsOpen;
-        renderRunDetails();
-      },
-    },
-    [icon("chevron"), el("span", { text: "Run details" })]
-  );
-
-  return el("section", { class: "run-details" }, [toggle, body]);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
