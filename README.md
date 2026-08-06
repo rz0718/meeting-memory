@@ -1,5 +1,15 @@
 # Meeting Memory
 
+> **Your company already writes its knowledge down — in Slack messages and meeting
+> notes it never reads again. We turn that trace into a ledger of single, owned,
+> evidence-backed statements, and we show you the ones your people disagree about.**
+
+One fact, one file — each with its own status, owner, confidence, evidence, and change
+history. Not a summarizer: a ledger. Nobody tags or writes anything.
+[Read the full argument →](docs/positioning-narrative.md)
+
+---
+
 Meeting Memory turns Google Meet notes and selected Slack channels into an
 evidence-backed, searchable memory store. This repository contains only the
 memory engine; source notes and generated memory can live outside this checkout.
