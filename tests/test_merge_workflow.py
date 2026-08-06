@@ -186,6 +186,64 @@ class MergeWorkflowTest(unittest.TestCase):
         self.assertEqual(before_loser, loser.path.read_bytes())
         self.assertTrue(loser.path.exists())
 
+    def test_merge_persists_a_custom_statement_and_the_review_note(self):
+        survivor = self.make_object(
+            identifier="metric-survivor",
+            title="Survivor",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-06-01",
+        )
+        self.make_object(
+            identifier="metric-loser",
+            title="Loser",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-07-07",
+        )
+        final_statement = "The final statement combines both canonical records."
+        review_note = "Consolidating the two supported descriptions."
+
+        result = self.merger().merge(
+            "metric-loser",
+            "metric-survivor",
+            "rui",
+            review_note,
+            statement=final_statement,
+        )
+
+        self.assertEqual(final_statement, result.after["statement"])
+        reloaded = self.repository.load_knowledge_file(survivor.path)
+        self.assertEqual(final_statement, reloaded.statement)
+        self.assertIn(review_note, reloaded.history[-1])
+
+    def test_merge_rejects_a_whitespace_only_statement_without_mutation(self):
+        survivor = self.make_object(
+            identifier="metric-survivor",
+            title="Survivor",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-06-01",
+        )
+        loser = self.make_object(
+            identifier="metric-loser",
+            title="Loser",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-07-07",
+        )
+        before_survivor = survivor.path.read_bytes()
+        before_loser = loser.path.read_bytes()
+
+        with self.assertRaisesRegex(MergeError, "final statement may not be empty"):
+            self.merger().merge(
+                "metric-loser",
+                "metric-survivor",
+                "rui",
+                "Consolidating duplicates.",
+                statement="   ",
+            )
+
+        self.assertEqual(before_survivor, survivor.path.read_bytes())
+        self.assertEqual(before_loser, loser.path.read_bytes())
+        self.assertTrue(loser.path.exists())
+
     def test_merge_preflight_blocks_dangling_suggestion_before_mutation(self):
         survivor = self.make_object(
             identifier="metric-survivor",

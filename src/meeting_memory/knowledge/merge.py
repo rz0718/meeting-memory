@@ -152,6 +152,10 @@ class KnowledgeMerger:
     ) -> MergeResult:
         reviewer = reviewer.strip()
         note = note.strip()
+        if statement is not None:
+            statement = statement.strip()
+            if not statement:
+                raise MergeError("final statement may not be empty")
         if not reviewer:
             raise MergeError("reviewer may not be empty")
         if not note:

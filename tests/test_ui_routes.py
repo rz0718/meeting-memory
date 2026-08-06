@@ -356,6 +356,7 @@ class ArgumentEquivalenceTest(unittest.TestCase):
             loser_id="metric-threshold",
             survivor_id="policy-threshold",
             note="The same standing threshold recorded twice.",
+            statement="Combined final statement.",
             allow_cross_category=True,
             allow_conflicting_numbers=True,
             dry_run=True,
@@ -372,6 +373,8 @@ class ArgumentEquivalenceTest(unittest.TestCase):
                     "rui",
                     "--note",
                     "The same standing threshold recorded twice.",
+                    "--statement",
+                    "Combined final statement.",
                     "--allow-cross-category",
                     "--allow-conflicting-numbers",
                     "--dry-run",
@@ -726,16 +729,23 @@ class MergeRouteTest(UiTestCase):
             "loser_id": loser.id,
             "survivor_id": survivor.id,
             "note": "The same project recorded twice.",
+            "statement": "The final statement combines both project records.",
         }
 
         refused = self.client.post("/api/merge", json={**body, "dry_run": False})
-        self.client.post("/api/merge", json={**body, "dry_run": True})
+        preview = self.client.post(
+            "/api/merge", json={**body, "dry_run": True}
+        ).json()
         applied = self.client.post("/api/merge", json={**body, "dry_run": False})
 
         self.assertEqual(400, refused.status_code)
         self.assertEqual(200, applied.status_code)
+        self.assertEqual(body["statement"], preview["preview"]["after"]["statement"])
         self.assertFalse(loser.path.exists())
         self.assertTrue(survivor.path.is_file())
+        reloaded = self.repository.load_knowledge_file(survivor.path)
+        self.assertEqual(body["statement"], reloaded.statement)
+        self.assertIn(body["note"], reloaded.history[-1])
 
     def test_cross_category_merge_is_refused_until_the_override_is_ticked(self):
         survivor = self.make_object("project-framework")
