@@ -293,13 +293,13 @@ export async function openBasketDialog() {
   const output = el("div", {});
   const applyButton = el("button", { class: "btn btn--danger", disabled: true }, [
     icon("trash"),
-    el("span", { text: "Remove permanently" }),
+    el("span", { text: "Delete" }),
   ]);
   let approved = null;
 
   const previewButton = el("button", { class: "btn" }, [
     icon("doc"),
-    el("span", { text: "Write inventory and preview" }),
+    el("span", { text: "Preview" }),
   ]);
   previewButton.addEventListener("click", async () => {
     applyButton.disabled = true;
@@ -310,10 +310,6 @@ export async function openBasketDialog() {
       approved = result.basket;
       mount(output, removalPreview(result));
       applyButton.disabled = false;
-      applyButton.lastChild.textContent =
-        approved.inventory_count === 1
-          ? "Remove 1 object"
-          : `Remove ${approved.inventory_count} objects`;
     } catch (error) {
       mount(output, el("div", { class: "callout callout--danger" }, [
         icon("alert"),
@@ -394,7 +390,7 @@ export async function openBasketDialog() {
       basket.count
         ? el("button", {
             class: "btn",
-            text: "Empty basket",
+            text: "Clear",
             onClick: async () => {
               await api.basketClear();
               closeModal();
