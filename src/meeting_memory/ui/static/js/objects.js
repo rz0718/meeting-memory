@@ -278,6 +278,7 @@ export async function openMergeDialog(loserId) {
               class: "merge-survivor__option",
               type: "button",
               role: "option",
+              tabindex: "-1",
               "aria-selected": candidate.id === survivorId,
               onMouseDown: (event) => event.preventDefault(),
               onClick: () => selectSurvivor(candidate.id),
@@ -363,6 +364,7 @@ export async function openMergeDialog(loserId) {
     }
     if (event.key === "Escape" && resultsOpen) {
       event.preventDefault();
+      event.stopPropagation();
       setResultsOpen(false);
     }
   });
