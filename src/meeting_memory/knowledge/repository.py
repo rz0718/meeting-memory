@@ -27,6 +27,7 @@ from .models import (
     KnowledgeObject,
     MeetingSource,
     ReviewItem,
+    Tombstone,
     validate_review_run_manifest,
     validate_run_manifest,
     validate_source_state,
@@ -95,6 +96,7 @@ class KnowledgeRepository:
         self.suggestion_dir = self.review_dir / "suggestions"
         self.state_dir = self.root / ".knowledge-state"
         self.review_run_dir = self.state_dir / "review-runs"
+        self.tombstone_dir = self.state_dir / "tombstones"
         self.outputs_dir = self.root / "outputs" / "Durable-Knowledge"
         self.logs_dir = self.root / "logs"
         # Thread-local, so one request's cache can never be seen -- or resurrected
@@ -193,7 +195,7 @@ class KnowledgeRepository:
         for status in REVIEW_STATUSES:
             (self.review_dir / status).mkdir(parents=True, exist_ok=True)
         self.suggestion_dir.mkdir(parents=True, exist_ok=True)
-        for child in ("sources", "runs", "review-runs", "projects"):
+        for child in ("sources", "runs", "review-runs", "projects", "tombstones"):
             (self.state_dir / child).mkdir(parents=True, exist_ok=True)
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -729,6 +731,27 @@ class KnowledgeRepository:
             validate_source_state(raw)
             yield path, raw
 
+    def tombstone_path(self, object_id: str) -> Path:
+        return self.tombstone_dir / ("%s.json" % self._artifact_id(object_id, "object ID"))
+
+    def load_tombstones(self) -> List[Tombstone]:
+        return self._cached("tombstones", self._load_tombstones)
+
+    def _load_tombstones(self) -> List[Tombstone]:
+        if not self.tombstone_dir.exists():
+            return []
+        values = []
+        for path in sorted(self.tombstone_dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise SchemaError("invalid tombstone %s: %s" % (path, exc)) from exc
+            tombstone = Tombstone.from_dict(raw, path=path)
+            if tombstone.object_id != path.stem:
+                raise SchemaError("tombstone identity does not match its path: %s" % path)
+            values.append(tombstone)
+        return values
+
     def latest_successful_run(self) -> Optional[Dict[str, Any]]:
         directory = self.state_dir / "runs"
         if not directory.exists():
@@ -777,6 +800,10 @@ class KnowledgeRepository:
                 # and that its source/line locator still exists.
                 self.validate_evidence(evidence, require_current_hash=False)
         review_count = len(self.load_review_ids())
+        from .tombstones import validate_tombstones
+
+        tombstones = self.load_tombstones()
+        validate_tombstones(tombstones, (item.id for item in objects))
         state_count = sum(1 for _ in self.iter_source_states())
         run_count = 0
         runs = self.state_dir / "runs"
@@ -822,6 +849,7 @@ class KnowledgeRepository:
             "knowledge_objects": len(objects),
             "review_items": review_count,
             "source_states": state_count,
+            "tombstones": len(tombstones),
             "run_manifests": run_count,
             "suggestions": suggestion_count,
             "review_run_manifests": review_run_count,

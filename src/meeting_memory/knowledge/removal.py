@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .errors import RemovalError
 from .indexes import generate_indexes
 from .repository import KnowledgeRepository, mutation_locked
+from .tombstones import stage_tombstone, tombstone_record
 from .util import iso_z, json_bytes, run_id, sha256_file, utc_now
 
 
@@ -20,6 +21,7 @@ class RemovalResult:
     updated_object_ids: Tuple[str, ...]
     updated_review_ids: Tuple[str, ...]
     updated_source_states: Tuple[str, ...]
+    tombstone_paths: Tuple[str, ...]
     changed_paths: Tuple[str, ...]
     index_changed_paths: Tuple[str, ...]
     manifest_path: Optional[str]
@@ -32,6 +34,7 @@ class RemovalResult:
             "updated_object_ids": list(self.updated_object_ids),
             "updated_review_ids": list(self.updated_review_ids),
             "updated_source_states": list(self.updated_source_states),
+            "tombstone_paths": list(self.tombstone_paths),
             "changed_paths": list(self.changed_paths),
             "index_changed_paths": list(self.index_changed_paths),
             "manifest_path": self.manifest_path,
@@ -208,6 +211,27 @@ class KnowledgeRemover:
         }
         changes[manifest_path] = json_bytes(manifest)
         preconditions[manifest_path] = None
+        relative_manifest = self.repository._relative(manifest_path)
+
+        # Written in the same transaction as the deletions they describe, so a
+        # removed object can never exist without the record that keeps the next
+        # extraction from recreating it.
+        tombstone_paths = tuple(
+            stage_tombstone(
+                self.repository,
+                tombstone_record(
+                    by_id[object_id],
+                    "removed",
+                    now_text,
+                    reviewer,
+                    note,
+                    manifest_path=relative_manifest,
+                ),
+                changes,
+                preconditions,
+            )
+            for object_id in requested
+        )
 
         changed_paths = tuple(
             sorted(
@@ -217,13 +241,13 @@ class KnowledgeRemover:
                 }
             )
         )
-        relative_manifest = self.repository._relative(manifest_path)
         if dry_run:
             return RemovalResult(
                 object_ids=requested,
                 updated_object_ids=tuple(sorted(updated_objects)),
                 updated_review_ids=tuple(sorted(updated_reviews)),
                 updated_source_states=tuple(sorted(updated_states)),
+                tombstone_paths=tombstone_paths,
                 changed_paths=changed_paths,
                 index_changed_paths=(),
                 manifest_path=relative_manifest,
@@ -245,6 +269,7 @@ class KnowledgeRemover:
             updated_object_ids=tuple(sorted(updated_objects)),
             updated_review_ids=tuple(sorted(updated_reviews)),
             updated_source_states=tuple(sorted(updated_states)),
+            tombstone_paths=tombstone_paths,
             changed_paths=changed_paths,
             index_changed_paths=index_paths,
             manifest_path=relative_manifest,

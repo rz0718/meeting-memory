@@ -33,6 +33,7 @@ from .indexes import generate_indexes
 from .models import Evidence, KnowledgeObject
 from .reconcile import conflicting_measurements
 from .repository import KnowledgeRepository, mutation_locked
+from .tombstones import stage_tombstone, tombstone_record
 from .util import iso_z, sha256_file, utc_now
 
 
@@ -77,6 +78,7 @@ class MergeResult:
     evidence_added: int
     retargeted_review_ids: Tuple[str, ...]
     retargeted_object_ids: Tuple[str, ...]
+    tombstone_path: str
     before: Optional[Dict[str, Any]]
     after: Optional[Dict[str, Any]]
     changed_paths: Tuple[str, ...]
@@ -90,6 +92,7 @@ class MergeResult:
             "evidence_added": self.evidence_added,
             "retargeted_review_ids": list(self.retargeted_review_ids),
             "retargeted_object_ids": list(self.retargeted_object_ids),
+            "tombstone_path": self.tombstone_path,
             "before": self.before,
             "after": self.after,
             "changed_paths": list(self.changed_paths),
@@ -303,6 +306,24 @@ class KnowledgeMerger:
             preconditions[updated_item.path] = review_digests[item.id]
             retargeted_reviews.append(item.id)
 
+        # The loser's own record, captured before the survivor was mutated. A
+        # merge asserts the two state the same fact, so this redirects rather
+        # than suppresses: a later restatement in the loser's wording carries
+        # evidence that belongs on the survivor.
+        tombstone_path = stage_tombstone(
+            self.repository,
+            tombstone_record(
+                loser,
+                "merged",
+                now_text,
+                reviewer,
+                note,
+                redirect_to=survivor.id,
+            ),
+            changes,
+            preconditions,
+        )
+
         changed_paths = tuple(
             self.repository._relative(path) for path in sorted(changes, key=str)
         ) + tuple(self.repository._relative(path) for path in deletes)
@@ -315,6 +336,7 @@ class KnowledgeMerger:
                 evidence_added=added,
                 retargeted_review_ids=tuple(sorted(retargeted_reviews)),
                 retargeted_object_ids=tuple(sorted(retargeted_objects)),
+                tombstone_path=tombstone_path,
                 before=before,
                 after=_object_summary(survivor),
                 changed_paths=changed_paths,
@@ -335,6 +357,7 @@ class KnowledgeMerger:
             evidence_added=added,
             retargeted_review_ids=tuple(sorted(retargeted_reviews)),
             retargeted_object_ids=tuple(sorted(retargeted_objects)),
+            tombstone_path=tombstone_path,
             before=before,
             after=_object_summary(survivor),
             changed_paths=changed_paths,

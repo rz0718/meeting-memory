@@ -104,6 +104,7 @@ class KnowledgePipeline:
             "objects_refined": [],
             "review_items_created": [],
             "candidates_rejected": [],
+            "candidates_suppressed": [],
             "errors": [],
         }
 
@@ -240,8 +241,9 @@ class KnowledgePipeline:
         changes_by_date: Dict[str, Dict[str, List[str]]],
         source,
         now_text: str,
+        tombstones: Sequence[Any] = (),
     ) -> Tuple[List[KnowledgeObject], List[str], List[str], List[str]]:
-        decision = self.reconciler.reconcile(candidate, objects)
+        decision = self.reconciler.reconcile(candidate, objects, tombstones)
         changed_object_ids: List[str] = []
         review_item_ids: List[str] = []
         associated_object_ids: List[str] = []
@@ -249,6 +251,20 @@ class KnowledgePipeline:
             (item for item in objects if item.id == decision.existing_id),
             None,
         )
+        if decision.outcome == "suppressed":
+            # A deliberate retirement is not re-litigated on every restatement:
+            # permanent removal already costs a reviewer, a note, and a
+            # confirmed inventory. The manifest keeps the block visible so a
+            # fact many sources keep asserting can still be noticed.
+            manifest["candidates_suppressed"].append(
+                {
+                    "source": source.relative_path,
+                    "title": candidate.title,
+                    "tombstone_id": decision.tombstone_id,
+                    "reason": decision.reason,
+                }
+            )
+            return objects, changed_object_ids, review_item_ids, associated_object_ids
         if decision.outcome == "insufficient_evidence":
             manifest["candidates_rejected"].append(
                 {
@@ -391,6 +407,11 @@ class KnowledgePipeline:
             for item in manifest["candidates_rejected"]
             if item.get("source", "").startswith("meetings/%s/" % source_date)
         ]
+        suppressed = [
+            item
+            for item in manifest["candidates_suppressed"]
+            if item.get("source", "").startswith("meetings/%s/" % source_date)
+        ]
         changed_ids = set(
             date_changes["created"]
             + date_changes["reconfirmed"]
@@ -421,6 +442,7 @@ class KnowledgePipeline:
 - %d objects refined
 - %d review items created
 - %d candidates rejected
+- %d candidates suppressed by a retired object
 
 ## Important Changes
 
@@ -443,6 +465,7 @@ class KnowledgePipeline:
             len(date_changes["refined"]),
             len(reviews),
             len(rejected),
+            len(suppressed),
             important,
             review_lines,
             file_lines,
@@ -472,6 +495,9 @@ class KnowledgePipeline:
         try:
             objects = copy.deepcopy(self.repository.load_knowledge())
             review_ids = self.repository.load_review_ids()
+            # Read once for the whole run: nothing in a run writes tombstones,
+            # and removal and merge hold the mutation lock this run also holds.
+            tombstones = self.repository.load_tombstones()
         except Exception as exc:
             manifest["errors"].append({"scope": "repository", "error": str(exc)})
             manifest["status"] = "failed"
@@ -536,6 +562,7 @@ class KnowledgePipeline:
                         "objects_refined",
                         "review_items_created",
                         "candidates_rejected",
+                        "candidates_suppressed",
                     )
                 }
                 source_event_length = len(events_by_date[source_date])
@@ -574,6 +601,7 @@ class KnowledgePipeline:
                             changes_by_date,
                             source,
                             now_text,
+                            tombstones,
                         )
                         source_changed.extend(changed)
                         source_reviews.extend(reviews)

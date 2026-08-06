@@ -24,6 +24,7 @@ from .constants import (
     REVIEW_ACTIONS,
     REVIEW_STATUSES,
     STATUSES,
+    TOMBSTONE_KINDS,
 )
 from .configuration import (
     config_path as _config_path,
@@ -53,6 +54,7 @@ from .extractors import FakeExtractor, OpenRouterExtractor
 from .indexes import generate_indexes
 from .merge import KnowledgeMerger
 from .removal import KnowledgeRemover
+from .tombstones import backfill_tombstones, lift_tombstone, list_tombstones
 from .openrouter import OpenRouterChatClient
 from .pipeline import KnowledgePipeline, PipelineResult
 from .presentation import (
@@ -363,6 +365,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-index", action="store_true", help="do not regenerate browse indexes"
     )
     _add_output(remove)
+
+    tombstone = commands.add_parser(
+        "tombstone",
+        help="inspect and lift the records that keep retired objects retired",
+    )
+    tombstone_commands = tombstone.add_subparsers(
+        dest="tombstone_command", required=True
+    )
+
+    tombstone_list = tombstone_commands.add_parser(
+        "list", help="list retired canonical identities"
+    )
+    tombstone_list.add_argument(
+        "--kind",
+        choices=(*TOMBSTONE_KINDS, "all"),
+        default="all",
+        help="tombstone kind to list (default: all)",
+    )
+    _add_output(tombstone_list)
+
+    tombstone_lift = tombstone_commands.add_parser(
+        "lift",
+        help="stop a tombstone from blocking re-extraction (does not restore content)",
+    )
+    tombstone_lift.add_argument("object_id", help="retired canonical object ID")
+    tombstone_lift.add_argument("--reviewer", required=True)
+    tombstone_lift.add_argument("--note", required=True)
+    tombstone_lift.add_argument("--dry-run", action="store_true")
+    _add_output(tombstone_lift)
+
+    tombstone_backfill = tombstone_commands.add_parser(
+        "backfill",
+        help="rebuild removal tombstones from existing cleanup manifests",
+    )
+    tombstone_backfill.add_argument("--dry-run", action="store_true")
+    _add_output(tombstone_backfill)
 
     review = commands.add_parser(
         "review", help="list, inspect, and resolve human-review cases"
@@ -749,11 +787,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         detached_project = (
             args.command == "project" and args.project_command == "list"
         )
+        detached_tombstone = (
+            args.command == "tombstone" and args.tombstone_command == "list"
+        )
         if (
             args.allow_missing_evidence
             and args.command not in detached_commands
             and not detached_review
             and not detached_project
+            and not detached_tombstone
         ):
             raise ValueError(
                 "--allow-missing-evidence is limited to read-only consumption commands"
@@ -866,6 +908,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "Retargeted related objects: %s"
                         % ", ".join(result.retargeted_object_ids)
                     )
+                print("Tombstone: %s" % result.tombstone_path)
                 print("Changed paths:")
                 for path in result.changed_paths:
                     print("  %s" % path)
@@ -916,11 +959,98 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("Updated reviews: %d" % len(result.updated_review_ids))
                 print("Updated source states: %d" % len(result.updated_source_states))
                 print("Cleanup manifest: %s" % result.manifest_path)
+                print("Tombstones written: %d" % len(result.tombstone_paths))
                 if result.index_changed_paths:
                     print(
                         "Regenerated index paths: %d"
                         % len(result.index_changed_paths)
                     )
+            return 0
+
+        if args.command == "tombstone":
+            if args.tombstone_command == "list":
+                values = list_tombstones(
+                    repository, None if args.kind == "all" else args.kind
+                )
+                if args.json:
+                    print(
+                        json.dumps(
+                            [value.to_dict() for value in values],
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    if not values:
+                        print("No retired objects.")
+                    for value in values:
+                        target = (
+                            " -> %s" % value.redirect_to
+                            if value.kind == "merged"
+                            else ""
+                        )
+                        print(
+                            "%s  [%s]%s  %s"
+                            % (
+                                value.object_id,
+                                value.kind,
+                                target,
+                                value.created_at[:10],
+                            )
+                        )
+                        print("    %s" % value.title)
+                        print("    %s: %s" % (value.reviewer, value.note))
+                    print("%d retired object(s)." % len(values))
+                return 0
+            if args.tombstone_command == "backfill":
+                result = backfill_tombstones(repository, dry_run=args.dry_run)
+                if args.json:
+                    print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+                else:
+                    mode = "Would create" if result.dry_run else "Created"
+                    print("%s %d tombstone(s)." % (mode, len(result.created)))
+                    for value in result.created:
+                        print("  %s" % value)
+                    if result.skipped_live:
+                        print(
+                            "Skipped %d ID(s) that are live again: %s"
+                            % (len(result.skipped_live), ", ".join(result.skipped_live))
+                        )
+                    if result.skipped_existing:
+                        print(
+                            "Skipped %d ID(s) already recorded."
+                            % len(result.skipped_existing)
+                        )
+                    if result.skipped_lifted:
+                        print(
+                            "Skipped %d ID(s) deliberately lifted: %s"
+                            % (
+                                len(result.skipped_lifted),
+                                ", ".join(result.skipped_lifted),
+                            )
+                        )
+                    print(
+                        "Merges performed before tombstones existed leave no "
+                        "structured record and cannot be rebuilt here."
+                    )
+                return 0
+            result = lift_tombstone(
+                repository,
+                args.object_id,
+                args.reviewer,
+                args.note,
+                dry_run=args.dry_run,
+            )
+            if args.json:
+                print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+            else:
+                mode = "Dry run" if result.dry_run else "Lifted"
+                print("%s tombstone %s [%s]." % (mode, result.object_id, result.kind))
+                print(
+                    "Deleted content is not restored; the next run re-extracts "
+                    "this fact only if current evidence still states it."
+                )
+                print("Lift manifest: %s" % result.manifest_path)
             return 0
 
         if args.command == "review":
@@ -1434,7 +1564,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 print(
                     "Valid: %(knowledge_objects)d objects, %(review_items)d review items, "
-                    "%(source_states)d source states, %(run_manifests)d run manifests" % counts
+                    "%(source_states)d source states, %(tombstones)d retired objects, "
+                    "%(run_manifests)d run manifests" % counts
                 )
                 print("Machine index: %s" % counts["machine_index_status"])
             return 0

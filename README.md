@@ -486,6 +486,84 @@ override is stored in the resolution record. It is not valid with
 `keep-existing` or `merge-duplicate`, because those actions do not promote the
 candidate evidence.
 
+## Retired knowledge and tombstones
+
+Removing an object or merging one away deletes its canonical file. Without a
+further record the deletion is invisible to reconciliation, which compares
+candidates only against objects on disk and therefore reads a retired fact as
+new knowledge. A **tombstone** is the durable record of the decision.
+
+Every removal and every merge writes one tombstone per retired ID to
+`.knowledge-state/tombstones/<object-id>.json`, inside the same atomic
+transaction as the deletion, so neither can land without the other.
+
+```bash
+# Every retired identity, with the reviewer and note that retired it.
+meeting-memory tombstone list
+meeting-memory tombstone list --kind merged --json
+```
+
+Reconciliation consults tombstones only where the answer would otherwise be
+`new`, so a tombstone can never shadow a live object. Two outcomes follow:
+
+- A candidate matching a **removed** tombstone is suppressed. It is dropped and
+  recorded in the run manifest under `candidates_suppressed` with its source
+  and the tombstone that blocked it, and the daily report and run UI state the
+  count. Permanent removal already costs a reviewer, a note, and a confirmed
+  inventory; a restatement does not re-open that decision.
+- A candidate matching a **merged** tombstone is redirected to the survivor and
+  then classified normally against it. A clean restatement reconfirms the
+  survivor and attaches its evidence; one that moved a threshold, sign,
+  polarity, or status still becomes a conflict and reaches review. Chains
+  (`loser -> survivor -> later survivor`) resolve transitively; if the survivor
+  was itself later removed, the candidate is suppressed.
+
+Matching uses the same identity rules applied to live objects — generated ID,
+exact normalized title, token containment, and bounded similarity — not the ID
+alone. An object's ID is derived from its slugified title, so an ID-only check
+would miss a restatement whose wording drifted. A candidate that matches two
+tombstones ambiguously reaches a human as a review item.
+
+### Lifting a tombstone
+
+```bash
+meeting-memory tombstone lift policy-fx-excess-threshold \
+  --reviewer rui --note "Reversed: the threshold is still in force."
+```
+
+Lifting does **not** restore the deleted content. That content is gone, and its
+evidence digests were captured against sources that may since have changed, so
+reconstructing it would be a fabrication. Lifting only stops the blocking: the
+next run re-extracts the fact from whatever evidence exists now, or does not.
+
+Each lift writes `.knowledge-state/cleanup-runs/tombstone-lift-<run>.json`.
+Lifting is refused while another tombstone redirects through the target, which
+would leave that chain pointing at an ID that is neither live nor retired.
+There is no UI affordance for lifting — reversal should cost what the removal
+cost.
+
+### Backfilling older removals
+
+```bash
+meeting-memory tombstone backfill --dry-run
+meeting-memory tombstone backfill
+```
+
+Removals performed before tombstones existed can be rebuilt from their cleanup
+manifests, which record each object's ID, title, category, and reviewer. IDs
+that are live again, already recorded, or deliberately lifted are skipped and
+reported. Merges performed before this change left no structured record — only
+prose in the survivor's history — and cannot be rebuilt; they must be
+re-asserted by hand.
+
+Backfill is an explicit operator action rather than an automatic migration,
+because an ID named by an old manifest may since have been legitimately
+re-created.
+
+`meeting-memory validate` reports the tombstone count and enforces that a
+tombstoned ID is not also live, that every merge redirect resolves, and that no
+redirect chain cycles.
+
 ## Local review UI
 
 `meeting-memory ui` serves a three-tab web UI on `127.0.0.1:8787` for the morning
@@ -551,6 +629,8 @@ or `KnowledgeRemover` — the same objects the CLI wraps — and every write is
 gated on a dry run whose preview you have seen. The server refuses an apply
 whose arguments differ from the previewed decision. There is no bulk accept, no
 inline auto-save, and no undo: reversing a decision is a new audited action.
+Merging and removal both write tombstones, so a decision made here holds across
+later runs; reversing one is `tombstone lift` at the CLI.
 
 Canonical drift replaces the action panel with a guided refresh (`refresh
 --dry-run` → apply → regenerate the suggestion), because the resolver refuses

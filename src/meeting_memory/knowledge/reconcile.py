@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .constants import CATEGORY_PREFIX
-from .models import KnowledgeCandidate, KnowledgeObject, ReconciliationDecision
+from .models import (
+    KnowledgeCandidate,
+    KnowledgeObject,
+    ReconciliationDecision,
+    Tombstone,
+)
+from .tombstones import resolve_survivor
 from .util import jaccard, normalize_text, slugify, token_set
 
 
@@ -310,10 +316,62 @@ class KnowledgeReconciler:
             "needs_review", existing.id, "semantic relationship is not safe to determine"
         )
 
+    def _find_tombstone(
+        self,
+        candidate: KnowledgeCandidate,
+        tombstones: Sequence[Tombstone],
+    ) -> Tuple[Optional[Tombstone], bool]:
+        """Match a candidate against retired identities.
+
+        Deliberately mirrors _find_match rather than comparing IDs. A removed
+        object's ID is derived from its slugified title, so a restatement whose
+        wording drifted produces a different ID and would slip past an
+        ID-only check -- the removal would appear to hold until the one time
+        the title moved. The same containment and similarity rules that decide
+        a live match therefore decide a retired one.
+        """
+        relevant = [item for item in tombstones if item.category == candidate.category]
+        if not relevant:
+            return None, False
+        by_id = {item.object_id: item for item in relevant}
+        base = "%s-%s" % (CATEGORY_PREFIX[candidate.category], slugify(candidate.title))
+        if base in by_id:
+            return by_id[base], False
+
+        normalized_title = normalize_text(candidate.title)
+        exact = [item for item in relevant if normalize_text(item.title) == normalized_title]
+        if len(exact) == 1:
+            return exact[0], False
+        if len(exact) > 1:
+            return None, True
+
+        contained = [
+            item
+            for item in relevant
+            if self._titles_contained(candidate.title, item.title)
+        ]
+        if len(contained) == 1:
+            return contained[0], False
+        if len(contained) > 1:
+            return None, True
+
+        similarities = sorted(
+            ((jaccard(candidate.title, item.title), item) for item in relevant),
+            key=lambda pair: (-pair[0], pair[1].object_id),
+        )
+        best_score, best = similarities[0]
+        tied = len(similarities) > 1 and similarities[1][0] == best_score
+        if best_score < self.likely_match_threshold:
+            return None, False
+        if tied:
+            return None, True
+        return best, False
+
     def reconcile(
         self,
         candidate: KnowledgeCandidate,
         existing_objects: List[KnowledgeObject],
+        tombstones: Sequence[Tombstone] = (),
     ) -> ReconciliationDecision:
         if not candidate.evidence:
             return ReconciliationDecision("insufficient_evidence", reason="candidate has no evidence")
@@ -325,5 +383,49 @@ class KnowledgeReconciler:
         if uncertain:
             return ReconciliationDecision("needs_review", reason="matching identity is uncertain")
         if match is None:
-            return ReconciliationDecision("new", reason="no conservative match found")
+            # Only consulted where the answer would otherwise be "new", so a
+            # tombstone can never shadow a live object.
+            return self._reconcile_retired(candidate, existing_objects, tombstones)
         return self._classify_change(candidate, match)
+
+    def _reconcile_retired(
+        self,
+        candidate: KnowledgeCandidate,
+        existing_objects: List[KnowledgeObject],
+        tombstones: Sequence[Tombstone],
+    ) -> ReconciliationDecision:
+        tombstone, uncertain = self._find_tombstone(candidate, tombstones)
+        if uncertain:
+            return ReconciliationDecision(
+                "needs_review",
+                reason="the candidate matches more than one retired object",
+            )
+        if tombstone is None:
+            return ReconciliationDecision("new", reason="no conservative match found")
+        if tombstone.kind == "merged":
+            by_id: Dict[str, Tombstone] = {
+                item.object_id: item for item in tombstones
+            }
+            survivor_id, terminal = resolve_survivor(tombstone.redirect_to, by_id)
+            if terminal == "merged":
+                survivor = next(
+                    (item for item in existing_objects if item.id == survivor_id),
+                    None,
+                )
+                if survivor is not None:
+                    # A merge asserts the two records state the same fact, so
+                    # this evidence belongs on the survivor. Classification
+                    # still runs: a restatement that moved a threshold, sign,
+                    # or status becomes a conflict rather than being folded in.
+                    return self._classify_change(candidate, survivor)
+            return ReconciliationDecision(
+                "suppressed",
+                reason="merged into %s, which is no longer present" % tombstone.redirect_to,
+                tombstone_id=tombstone.object_id,
+            )
+        return ReconciliationDecision(
+            "suppressed",
+            reason="permanently removed on %s by %s"
+            % (tombstone.created_at[:10], tombstone.reviewer),
+            tombstone_id=tombstone.object_id,
+        )

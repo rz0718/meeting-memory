@@ -681,6 +681,15 @@ function sourceSummary(counts, unchanged) {
           text: `${counts.candidates_rejected} candidates rejected during this run.`,
         })
       : null,
+    // A removed or merged-away fact that sources keep restating is the signal
+    // that the retirement may have been wrong, so the block is stated rather
+    // than left silent.
+    counts.candidates_suppressed
+      ? el("div", {
+          class: "source-summary__note",
+          text: `${counts.candidates_suppressed} candidates suppressed by a previously retired object.`,
+        })
+      : null,
   ]);
 }
 
