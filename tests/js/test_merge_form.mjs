@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   filterSurvivorCandidates,
   mergeRequestBody,
+  moveActiveIndex,
   objectStatement,
   shouldRestoreApply,
 } from "../../src/meeting_memory/ui/static/js/merge_form.js";
@@ -41,6 +42,14 @@ test("filterSurvivorCandidates keeps order, tolerates missing titles, and limits
   assert.equal(result.length, 300);
   assert.equal(result[0].id, "knowledge-0");
   assert.equal(result[299].id, "knowledge-299");
+});
+
+test("moveActiveIndex enters and wraps the survivor results", () => {
+  assert.equal(moveActiveIndex(-1, 3, 1), 0);
+  assert.equal(moveActiveIndex(-1, 3, -1), 2);
+  assert.equal(moveActiveIndex(2, 3, 1), 0);
+  assert.equal(moveActiveIndex(0, 3, -1), 2);
+  assert.equal(moveActiveIndex(0, 0, 1), -1);
 });
 
 test("objectStatement provides the selected survivor's initial final statement", () => {

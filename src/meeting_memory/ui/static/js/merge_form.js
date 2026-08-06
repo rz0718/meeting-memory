@@ -13,6 +13,12 @@ export function filterSurvivorCandidates(candidates, query, limit = 300) {
     .slice(0, limit);
 }
 
+export function moveActiveIndex(activeIndex, resultCount, direction) {
+  if (!resultCount) return -1;
+  if (activeIndex < 0) return direction < 0 ? resultCount - 1 : 0;
+  return (activeIndex + direction + resultCount) % resultCount;
+}
+
 export function mergeRequestBody({
   loserId,
   survivorId,
