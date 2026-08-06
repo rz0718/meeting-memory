@@ -2,12 +2,13 @@ import contextlib
 import copy
 import datetime as dt
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from meeting_memory.knowledge.cli import main
-from meeting_memory.knowledge.errors import MergeError
+from meeting_memory.knowledge.errors import MergeError, SchemaError
 from meeting_memory.knowledge.merge import KnowledgeMerger
 from meeting_memory.knowledge.models import Evidence, KnowledgeObject, ReviewItem
 from meeting_memory.knowledge.repository import KnowledgeRepository
@@ -110,6 +111,27 @@ class MergeWorkflowTest(unittest.TestCase):
     def merger(self):
         return KnowledgeMerger(self.repository, now_fn=lambda: FIXED_NOW)
 
+    def write_dangling_suggestion_manifest(self):
+        manifest = {
+            "schema_version": "1",
+            "run_type": "review_suggestions",
+            "run_id": "review-run-dangling",
+            "started_at": "2026-07-29T12:40:57Z",
+            "completed_at": "2026-07-29T12:41:04Z",
+            "status": "success",
+            "model": "test/model",
+            "prompt_version": "1",
+            "filters": {},
+            "requested_review_ids": ["review-dangling"],
+            "suggestions_created": {
+                "review-dangling": "suggestion-missing",
+            },
+            "suggestions_reused": {},
+            "failures": [],
+        }
+        path = self.repository.review_run_dir / "review-run-dangling.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
     def test_merge_unions_evidence_and_bumps_last_confirmed_to_the_newer_date(self):
         survivor = self.make_object(
             identifier="metric-survivor",
@@ -163,6 +185,44 @@ class MergeWorkflowTest(unittest.TestCase):
         self.assertEqual(before_survivor, survivor.path.read_bytes())
         self.assertEqual(before_loser, loser.path.read_bytes())
         self.assertTrue(loser.path.exists())
+
+    def test_merge_preflight_blocks_dangling_suggestion_before_mutation(self):
+        survivor = self.make_object(
+            identifier="metric-survivor",
+            title="Survivor",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-06-01",
+        )
+        loser = self.make_object(
+            identifier="metric-loser",
+            title="Loser",
+            statement="Excess inventory threshold is +/-$500K.",
+            observed_at="2026-07-07",
+        )
+        before_survivor = survivor.path.read_bytes()
+        before_loser = loser.path.read_bytes()
+        self.write_dangling_suggestion_manifest()
+
+        with self.assertRaises(SchemaError):
+            self.merger().merge(
+                "metric-loser",
+                "metric-survivor",
+                "rui",
+                "Consolidating duplicates.",
+                dry_run=True,
+            )
+        self.assertEqual(before_survivor, survivor.path.read_bytes())
+        self.assertEqual(before_loser, loser.path.read_bytes())
+
+        with self.assertRaises(SchemaError):
+            self.merger().merge(
+                "metric-loser",
+                "metric-survivor",
+                "rui",
+                "Consolidating duplicates.",
+            )
+        self.assertEqual(before_survivor, survivor.path.read_bytes())
+        self.assertEqual(before_loser, loser.path.read_bytes())
 
     def test_cross_category_merge_requires_explicit_override(self):
         self.make_object(

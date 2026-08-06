@@ -161,6 +161,7 @@ class KnowledgeMerger:
         self._validate_overrides(
             status, confidence, clear_owner, owner, clear_effective_date, effective_date
         )
+        self.repository.validate_all()
 
         objects = self.repository.load_knowledge()
         by_id = {value.id: value for value in objects}
