@@ -1907,7 +1907,8 @@ class StaticAssetTest(UiTestCase):
     def test_removal_basket_uses_concise_action_labels(self):
         source = self.client.get("/static/js/objects.js").text
 
-        self.assertIn('text: "Clear"', source)
+        self.assertIn('text: "Put back"', source)
+        self.assertNotIn('text: "Clear"', source)
         self.assertIn('text: "Preview"', source)
         self.assertIn('text: "Delete"', source)
         self.assertNotIn('text: "Empty basket"', source)
