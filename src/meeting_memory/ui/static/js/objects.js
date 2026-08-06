@@ -10,7 +10,9 @@ import { api } from "./api.js";
 import { calendarDate, callout, el, icon, instant, mount, property } from "./dom.js";
 import { evidenceList } from "./evidence.js";
 import {
+  filterSurvivorCandidates,
   mergeRequestBody,
+  moveActiveIndex,
   objectStatement,
   shouldRestoreApply,
 } from "./merge_form.js";
@@ -158,8 +160,29 @@ export async function openMergeDialog(loserId) {
     return;
   }
 
-  const search = el("input", { placeholder: "Filter by ID or title…", class: "" });
-  const select = el("select", { size: 8, style: "width:100%" });
+  const safeLoserId = String(loserId).replace(/[^A-Za-z0-9_-]/g, "-");
+  const selectorId = `merge-survivor-${safeLoserId}`;
+  const search = el("input", {
+    role: "combobox",
+    placeholder: "Search by knowledge ID or title…",
+    autocomplete: "off",
+    "aria-label": "Keep (survivor)",
+    "aria-autocomplete": "list",
+    "aria-controls": `${selectorId}-results`,
+    "aria-expanded": "false",
+  });
+  const results = el("div", {
+    id: `${selectorId}-results`,
+    class: "merge-survivor__results",
+    role: "listbox",
+    hidden: true,
+  });
+  const searchView = el("div", { class: "merge-survivor__search" }, [search, results]);
+  const selectedView = el("div", {
+    class: "merge-survivor__selected",
+    hidden: true,
+  });
+  const selector = el("div", { class: "merge-survivor" }, [searchView, selectedView]);
   const note = el("textarea", { placeholder: "Why these two records are one fact…" });
   const retiringStatement = objectStatement(store.knowledge, loserId);
   const survivorStatement = el("div", { class: "compare__text" });
@@ -176,7 +199,7 @@ export async function openMergeDialog(loserId) {
     { class: "btn btn--primary", disabled: true },
     [icon("check"), el("span", { text: "Apply merge" })]
   );
-  const previewButton = el("button", { class: "btn" }, [
+  const previewButton = el("button", { class: "btn", disabled: true }, [
     icon("doc"),
     el("span", { text: "Preview merge" }),
   ]);
@@ -184,12 +207,17 @@ export async function openMergeDialog(loserId) {
     class: "btn",
     type: "button",
     text: "Use survivor",
+    disabled: true,
   });
   const useRetiring = el("button", {
     class: "btn",
     type: "button",
     text: "Use retiring",
   });
+  let survivorId = "";
+  let matches = [];
+  let activeIndex = -1;
+  let resultsOpen = false;
   let draftVersion = 0;
 
   const invalidatePreview = () => {
@@ -199,50 +227,148 @@ export async function openMergeDialog(loserId) {
   };
 
   const updateSelectedSurvivor = ({ invalidate = true } = {}) => {
-    const selectedStatement = objectStatement(store.knowledge, select.value);
+    const selectedStatement = objectStatement(store.knowledge, survivorId);
     survivorStatement.textContent = selectedStatement || "No survivor selected.";
     survivorStatement.classList.toggle("secondary", !selectedStatement);
-    finalStatement.value = selectedStatement;
-    finalStatement.setCustomValidity("");
-    useSurvivor.disabled = !select.value;
-    if (invalidate) invalidatePreview();
+    useSurvivor.disabled = !survivorId;
+    previewButton.disabled = !survivorId;
+    if (invalidate) {
+      finalStatement.value = selectedStatement;
+      finalStatement.setCustomValidity("");
+      invalidatePreview();
+    }
   };
 
-  const fill = ({ initial = false } = {}) => {
-    const previousId = select.value;
-    const needle = search.value.trim().toLowerCase();
-    const matches = candidates
-      .filter(
-        (value) =>
-          !needle ||
-          value.id.toLowerCase().includes(needle) ||
-          value.title.toLowerCase().includes(needle)
-      )
-      .slice(0, 300);
+  const setResultsOpen = (open) => {
+    resultsOpen = Boolean(open) && !searchView.hidden;
+    results.hidden = !resultsOpen;
+    search.setAttribute("aria-expanded", String(resultsOpen));
+    if (!resultsOpen) {
+      activeIndex = -1;
+      search.removeAttribute("aria-activedescendant");
+    }
+  };
+
+  const setActiveIndex = (nextIndex) => {
+    activeIndex = nextIndex >= 0 && nextIndex < matches.length ? nextIndex : -1;
+    const options = results.querySelectorAll('[role="option"]');
+    options.forEach((option, index) => {
+      option.classList.toggle("is-active", index === activeIndex);
+    });
+    if (activeIndex < 0) {
+      search.removeAttribute("aria-activedescendant");
+      return;
+    }
+    const activeOption = options[activeIndex];
+    search.setAttribute("aria-activedescendant", activeOption.id);
+    activeOption.scrollIntoView({ block: "nearest" });
+  };
+
+  let selectSurvivor;
+  const renderResults = () => {
+    matches = filterSurvivorCandidates(candidates, search.value);
+    activeIndex = -1;
+    search.removeAttribute("aria-activedescendant");
     mount(
-      select,
+      results,
       matches.length
-        ? matches.map((value) =>
-            el("option", { value: value.id, text: `${value.title} — ${value.id}` })
+        ? matches.map((candidate, index) =>
+            el("button", {
+              id: `${selectorId}-option-${index}`,
+              class: "merge-survivor__option",
+              type: "button",
+              role: "option",
+              "aria-selected": candidate.id === survivorId,
+              onMouseDown: (event) => event.preventDefault(),
+              onClick: () => selectSurvivor(candidate.id),
+            }, [
+              el("span", {
+                class: "merge-survivor__title",
+                text: candidate.title || "Untitled",
+              }),
+              el("span", { class: "merge-survivor__id", text: candidate.id }),
+            ])
           )
-        : el("option", {
-            disabled: true,
-            value: "",
+        : el("div", {
+            class: "merge-survivor__empty",
+            role: "status",
             text: candidates.length
               ? "No matching knowledge objects"
               : "No other knowledge objects available",
           })
     );
-    if (matches.some((value) => value.id === previousId)) select.value = previousId;
-    const selectionChanged = select.value !== previousId;
-    previewButton.disabled = !select.value;
-    if (selectionChanged || initial) {
-      updateSelectedSurvivor({ invalidate: !initial });
-    }
   };
 
-  search.addEventListener("input", () => fill());
-  select.addEventListener("change", () => updateSelectedSurvivor());
+  const showSearch = () => {
+    search.value = "";
+    searchView.hidden = false;
+    selectedView.hidden = true;
+    renderResults();
+    search.focus();
+    setResultsOpen(true);
+  };
+
+  selectSurvivor = (nextId) => {
+    if (!nextId) return;
+    const candidate = candidates.find((value) => value.id === nextId);
+    if (!candidate) return;
+    const changed = nextId !== survivorId;
+    survivorId = nextId;
+    mount(selectedView, [
+      el("div", { class: "merge-survivor__selection" }, [
+        el("span", {
+          class: "merge-survivor__title",
+          text: candidate.title || "Untitled",
+        }),
+        el("span", { class: "merge-survivor__id", text: candidate.id }),
+      ]),
+      el("button", {
+        class: "btn",
+        type: "button",
+        text: "Change",
+        onClick: showSearch,
+      }),
+    ]);
+    setResultsOpen(false);
+    searchView.hidden = true;
+    selectedView.hidden = false;
+    updateSelectedSurvivor({ invalidate: changed });
+  };
+
+  search.addEventListener("input", () => {
+    renderResults();
+    setResultsOpen(true);
+  });
+  search.addEventListener("focus", () => {
+    renderResults();
+    setResultsOpen(true);
+  });
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setResultsOpen(true);
+      setActiveIndex(
+        moveActiveIndex(activeIndex, matches.length, event.key === "ArrowDown" ? 1 : -1)
+      );
+      return;
+    }
+    if (event.key === "Enter" && resultsOpen) {
+      const candidate =
+        activeIndex >= 0 ? matches[activeIndex] : matches.length === 1 ? matches[0] : null;
+      if (candidate) {
+        event.preventDefault();
+        selectSurvivor(candidate.id);
+      }
+      return;
+    }
+    if (event.key === "Escape" && resultsOpen) {
+      event.preventDefault();
+      setResultsOpen(false);
+    }
+  });
+  selector.addEventListener("focusout", (event) => {
+    if (!selector.contains(event.relatedTarget)) setResultsOpen(false);
+  });
   note.addEventListener("input", invalidatePreview);
   finalStatement.addEventListener("input", () => {
     finalStatement.setCustomValidity("");
@@ -251,7 +377,7 @@ export async function openMergeDialog(loserId) {
   crossCategory.addEventListener("change", invalidatePreview);
   conflictingNumbers.addEventListener("change", invalidatePreview);
   useSurvivor.addEventListener("click", () => {
-    finalStatement.value = objectStatement(store.knowledge, select.value);
+    finalStatement.value = objectStatement(store.knowledge, survivorId);
     finalStatement.setCustomValidity("");
     invalidatePreview();
   });
@@ -260,7 +386,8 @@ export async function openMergeDialog(loserId) {
     finalStatement.setCustomValidity("");
     invalidatePreview();
   });
-  fill({ initial: true });
+  renderResults();
+  updateSelectedSurvivor({ invalidate: false });
 
   const body = (survivorId) => mergeRequestBody({
     loserId,
@@ -272,7 +399,7 @@ export async function openMergeDialog(loserId) {
   });
 
   previewButton.addEventListener("click", async () => {
-    if (!select.value) return;
+    if (!survivorId) return;
     if (!finalStatement.value.trim()) {
       finalStatement.setCustomValidity("Final statement is required.");
       finalStatement.reportValidity();
@@ -282,7 +409,7 @@ export async function openMergeDialog(loserId) {
     const previewVersion = draftVersion;
     mount(output, busy("Running deterministic dry run…"));
     try {
-      const result = await api.merge({ ...body(select.value), dry_run: true });
+      const result = await api.merge({ ...body(survivorId), dry_run: true });
       if (previewVersion !== draftVersion) return;
       mount(output, mergePreview(result.preview));
       applyButton.disabled = false;
@@ -300,7 +427,7 @@ export async function openMergeDialog(loserId) {
     const applyVersion = draftVersion;
     applyButton.disabled = true;
     try {
-      const result = await api.merge({ ...body(select.value), dry_run: false });
+      const result = await api.merge({ ...body(survivorId), dry_run: false });
       closeModal();
       await refreshKnowledge();
       toast(
@@ -331,7 +458,7 @@ export async function openMergeDialog(loserId) {
         el("span", { text: ` (${loser.category})` }),
       ]),
       el("div", { class: "props" }, [
-        ...property("Keep (survivor)", el("div", {}, [search, select])),
+        ...property("Keep (survivor)", selector),
         ...property(
           "Source statements",
           el("div", { class: "compare merge-statements" }, [
