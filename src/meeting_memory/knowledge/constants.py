@@ -23,7 +23,9 @@ OUTCOMES = (
     "conflict",
     "insufficient_evidence",
     "needs_review",
+    "suppressed",
 )
+TOMBSTONE_KINDS = ("removed", "merged")
 RUN_STATUSES = ("success", "partial_failure", "failed")
 REVIEW_STATUSES = ("pending", "resolved", "rejected")
 REVIEW_ACTIONS = (

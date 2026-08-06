@@ -60,6 +60,8 @@ def _run_counts(manifest: Dict[str, Any]) -> Dict[str, int]:
         "objects_refined": len(manifest["objects_refined"]),
         "review_items_created": len(manifest["review_items_created"]),
         "candidates_rejected": len(manifest["candidates_rejected"]),
+        # Absent from manifests written before tombstones existed.
+        "candidates_suppressed": len(manifest.get("candidates_suppressed", [])),
         "errors": len(manifest["errors"]),
     }
 
@@ -277,6 +279,7 @@ def run_detail_payload(
         "sources_processed": list(manifest["sources_processed"]),
         "sources_skipped": list(manifest["sources_skipped"]),
         "candidates_rejected": list(manifest["candidates_rejected"]),
+        "candidates_suppressed": list(manifest.get("candidates_suppressed", [])),
         "errors": list(manifest["errors"]),
     }
 

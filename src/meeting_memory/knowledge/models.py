@@ -18,8 +18,12 @@ from .constants import (
     RUN_STATUSES,
     STATUSES,
     SUGGESTION_DISPOSITIONS,
+    TOMBSTONE_KINDS,
 )
 from .errors import SchemaError
+
+
+_OBJECT_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def _required_string(value: Any, field_name: str) -> str:
@@ -271,7 +275,7 @@ class KnowledgeObject:
         if not isinstance(related, list) or not all(isinstance(item, str) for item in related):
             raise SchemaError("knowledge.related_objects must be a string list")
         object_id = _required_string(raw.get("id"), "knowledge.id")
-        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", object_id):
+        if not _OBJECT_ID.fullmatch(object_id):
             raise SchemaError("knowledge.id must be lowercase kebab case")
         return cls(
             id=object_id,
@@ -315,10 +319,103 @@ class ReconciliationDecision:
     outcome: str
     existing_id: Optional[str] = None
     reason: str = ""
+    # Set only on ``suppressed``: which retired identity blocked the candidate.
+    # Kept separate from existing_id, which always names a live object.
+    tombstone_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.outcome not in OUTCOMES:
             raise SchemaError("invalid reconciliation outcome: %s" % self.outcome)
+
+
+@dataclass
+class Tombstone:
+    """A durable record that a canonical ID was retired deliberately.
+
+    Removal and merge both delete a canonical file. Without this record the
+    deletion is invisible to reconciliation, which compares candidates only
+    against objects on disk and therefore reads a retired fact as new
+    knowledge. ``category`` and ``title`` are carried so matching can apply the
+    same identity rules used for live objects: an ID alone would miss a
+    restatement whose wording drifted enough to slugify differently.
+    """
+
+    object_id: str
+    kind: str
+    category: str
+    title: str
+    statement: str
+    created_at: str
+    reviewer: str
+    note: str
+    redirect_to: Optional[str] = None
+    manifest_path: Optional[str] = None
+    path: Optional[Path] = None
+
+    @classmethod
+    def from_dict(cls, raw: Any, path: Optional[Path] = None) -> "Tombstone":
+        if not isinstance(raw, dict):
+            raise SchemaError("tombstone must be an object")
+        for key in (
+            "object_id",
+            "kind",
+            "category",
+            "title",
+            "statement",
+            "created_at",
+            "reviewer",
+            "note",
+        ):
+            if key not in raw:
+                raise SchemaError("tombstone is missing %s" % key)
+        object_id = _required_string(raw.get("object_id"), "tombstone.object_id")
+        if not _OBJECT_ID.fullmatch(object_id):
+            raise SchemaError("tombstone.object_id must be lowercase kebab case")
+        kind = _required_string(raw.get("kind"), "tombstone.kind")
+        if kind not in TOMBSTONE_KINDS:
+            raise SchemaError("tombstone.kind is not allowed: %s" % kind)
+        category = _required_string(raw.get("category"), "tombstone.category")
+        if category not in CATEGORIES:
+            raise SchemaError("tombstone.category is not allowed: %s" % category)
+        redirect_to = _nullable_string(raw.get("redirect_to"), "tombstone.redirect_to")
+        if kind == "merged":
+            if redirect_to is None:
+                raise SchemaError("a merged tombstone requires redirect_to")
+            if not _OBJECT_ID.fullmatch(redirect_to):
+                raise SchemaError("tombstone.redirect_to must be lowercase kebab case")
+            if redirect_to == object_id:
+                raise SchemaError("tombstone.redirect_to may not name itself")
+        elif redirect_to is not None:
+            raise SchemaError("a removed tombstone may not carry redirect_to")
+        return cls(
+            object_id=object_id,
+            kind=kind,
+            category=category,
+            title=_required_string(raw.get("title"), "tombstone.title"),
+            statement=_required_string(raw.get("statement"), "tombstone.statement"),
+            created_at=_timestamp(raw.get("created_at"), "tombstone.created_at"),
+            reviewer=_required_string(raw.get("reviewer"), "tombstone.reviewer"),
+            note=_required_string(raw.get("note"), "tombstone.note"),
+            redirect_to=redirect_to,
+            manifest_path=_nullable_string(
+                raw.get("manifest_path"), "tombstone.manifest_path"
+            ),
+            path=path,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "object_id": self.object_id,
+            "kind": self.kind,
+            "redirect_to": self.redirect_to,
+            "category": self.category,
+            "title": self.title,
+            "statement": self.statement,
+            "created_at": self.created_at,
+            "reviewer": self.reviewer,
+            "note": self.note,
+            "manifest_path": self.manifest_path,
+        }
 
 
 @dataclass
@@ -702,6 +799,15 @@ def validate_run_manifest(raw: Any) -> None:
     for key in ("candidates_rejected", "errors"):
         if not all(isinstance(item, dict) for item in raw[key]):
             raise SchemaError("run.%s must contain objects" % key)
+    # Optional rather than required: run manifests written before tombstones
+    # existed carry no such bucket and must keep validating, since validate_all
+    # reads every manifest ever written.
+    if "candidates_suppressed" in raw:
+        suppressed = raw["candidates_suppressed"]
+        if not isinstance(suppressed, list) or not all(
+            isinstance(item, dict) for item in suppressed
+        ):
+            raise SchemaError("run.candidates_suppressed must contain objects")
 
 
 def validate_review_run_manifest(raw: Any) -> None:
