@@ -11,10 +11,11 @@ import datetime as dt
 import difflib
 import json
 import re
+from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from ..knowledge.consumption import EvidenceReference
-from ..knowledge.errors import ReviewNotFoundError, SchemaError
+from ..knowledge.errors import EvidenceError, ReviewNotFoundError, SchemaError
 from ..knowledge.models import Evidence, KnowledgeObject, ReviewItem, validate_run_manifest
 from ..knowledge.presentation import ObjectNotFoundError, read_evidence_excerpt
 from ..knowledge.repository import KnowledgeRepository
@@ -23,7 +24,7 @@ from ..knowledge.review_suggestions import (
     latest_current_suggestion,
     suggestion_display_payload,
 )
-from ..knowledge.util import EVIDENCE_VERIFIED, sha256_bytes
+from ..knowledge.util import EVIDENCE_VERIFIED, parse_frontmatter, sha256_bytes
 
 
 MANIFEST_BUCKETS = (
@@ -40,6 +41,8 @@ BUCKET_LABELS = {
 }
 # "2026-07-31: Refined by slack-c0194tgl94h."
 _HISTORY_ENTRY = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2}): (?P<text>.+)$")
+# Sources are per-day artifacts, so the calendar day is in the path itself.
+_SOURCE_DATE = re.compile(r"^meetings/(?P<date>\d{4}-\d{2}-\d{2})/")
 # The only shape from which a prior statement can be read back honestly. No
 # writer in this repository emits it today; see docs/review-ui-plan.md §6.
 _PRIOR_STATEMENT = re.compile(r'previous statement: "(?P<statement>[^"]+)"', re.I)
@@ -205,13 +208,94 @@ def _refinement_diff(
     }
 
 
+def _describe_source(repository: KnowledgeRepository, source: str) -> Dict[str, Any]:
+    """Name a source for display.
+
+    Never raises. A source with no front matter is the ordinary case for meeting
+    notes, and a source deleted since the run still has to render -- the same
+    posture the reader takes with an unavailable excerpt.
+    """
+    stem = PurePosixPath(source).stem
+    fallback = stem.replace("-", " ").replace("_", " ").strip() or source
+    date = _SOURCE_DATE.match(source)
+    described = {
+        "source": source,
+        "label": fallback,
+        "date": date.group("date") if date else None,
+        "kind": "meeting",
+    }
+    try:
+        text = repository.evidence_path(source).read_text(encoding="utf-8")
+        raw, _ = parse_frontmatter(text)
+    except (EvidenceError, OSError, UnicodeError, SchemaError):
+        return described
+    if raw.get("source_type") == "slack":
+        described["kind"] = "slack"
+        channel = raw.get("slack_channel_id")
+        # The collector resolves user names only, so no channel name is stored
+        # anywhere in the repository. Showing the ID is honest; inventing a
+        # name is not.
+        if isinstance(channel, str) and channel.strip():
+            described["label"] = "Slack %s" % channel.strip()
+        return described
+    title = raw.get("title")
+    if isinstance(title, str) and title.strip():
+        described["label"] = title.strip()
+    return described
+
+
+class _SourceAttribution:
+    """Which of a run's processed sources an object came from.
+
+    Every outcome path appends the processing source's evidence before it
+    records the bucket (pipeline.py:283,308,338), so an object named by a
+    manifest carries evidence from the source that put it there. Evidence is
+    appended and never reordered (merge.py:58), so position breaks observed_at
+    ties.
+
+    Restricting to the run's own sources matters because a run spans several
+    meeting dates: an object touched by an early source may already carry later
+    evidence from an earlier run, and unqualified "latest" would file it under a
+    source this run never processed.
+    """
+
+    def __init__(
+        self, repository: KnowledgeRepository, sources_processed: Iterable[str]
+    ):
+        self._repository = repository
+        self._processed = set(sources_processed)
+        self._described: Dict[str, Dict[str, Any]] = {}
+
+    def source_for(self, obj: Optional[KnowledgeObject]) -> Optional[str]:
+        if obj is None or not obj.evidence:
+            return None
+        pool = [item for item in obj.evidence if item.source in self._processed]
+        if not pool:
+            pool = list(obj.evidence)
+        latest = max(
+            range(len(pool)),
+            key=lambda index: (pool[index].observed_at or "", index),
+        )
+        return pool[latest].source
+
+    def describe(self, source: str) -> Dict[str, Any]:
+        if source not in self._described:
+            self._described[source] = _describe_source(self._repository, source)
+        return self._described[source]
+
+
 def _object_row(
-    obj: Optional[KnowledgeObject], object_id: str, bucket: str, run_date: Optional[str]
+    obj: Optional[KnowledgeObject],
+    object_id: str,
+    bucket: str,
+    run_date: Optional[str],
+    attribution: _SourceAttribution,
 ) -> Dict[str, Any]:
     row = {
         "id": object_id,
         "bucket": bucket,
         "present": obj is not None,
+        "source": attribution.source_for(obj),
         "title": obj.title if obj is not None else None,
         "category": obj.category if obj is not None else None,
         "status": obj.status if obj is not None else None,
@@ -254,6 +338,7 @@ def run_detail_payload(
     objects = {value.id: value for value in repository.load_knowledge()}
     reviews = {value.id: value for value in repository.load_reviews()}
     run_date = _run_date(manifest)
+    attribution = _SourceAttribution(repository, manifest["sources_processed"])
     groups = []
     for bucket in MANIFEST_BUCKETS:
         if bucket == "review_items_created":
@@ -262,7 +347,7 @@ def run_detail_payload(
             ]
         else:
             rows = [
-                _object_row(objects.get(value), value, bucket, run_date)
+                _object_row(objects.get(value), value, bucket, run_date, attribution)
                 for value in manifest[bucket]
             ]
         groups.append(
@@ -273,9 +358,20 @@ def run_detail_payload(
                 "rows": rows,
             }
         )
+    # Every processed source in manifest order, then any source a fallback
+    # attribution reached for. The list pane needs a label for both.
+    ordered_sources = list(manifest["sources_processed"])
+    extra = {
+        row["source"]
+        for group in groups
+        for row in group["rows"]
+        if row.get("source") and row["source"] not in ordered_sources
+    }
+    ordered_sources.extend(sorted(extra))
     return {
         "summary": _run_summary(manifest),
         "groups": groups,
+        "sources": [attribution.describe(value) for value in ordered_sources],
         "sources_processed": list(manifest["sources_processed"]),
         "sources_skipped": list(manifest["sources_skipped"]),
         "candidates_rejected": list(manifest["candidates_rejected"]),

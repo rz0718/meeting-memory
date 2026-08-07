@@ -155,7 +155,7 @@ class UiTestCase(unittest.TestCase):
 
     # -- fixtures ----------------------------------------------------------
 
-    def make_object(self, object_id="project-framework", statement=None):
+    def make_object(self, object_id="project-framework", statement=None, evidence=None):
         obj = KnowledgeObject(
             id=object_id,
             title="Framework",
@@ -167,7 +167,9 @@ class UiTestCase(unittest.TestCase):
             confidence="medium",
             created_at="2026-07-28T08:00:00Z",
             updated_at="2026-07-28T08:00:00Z",
-            evidence=[
+            evidence=list(evidence)
+            if evidence is not None
+            else [
                 Evidence(
                     source=self.source_ref,
                     source_sha256=sha256_file(self.source),
@@ -513,6 +515,201 @@ class RunRoutesTest(UiTestCase):
         payload = self.client.get("/api/knowledge/%s" % obj.id).json()
 
         self.assertEqual([item.id], payload["pending_review_ids"])
+
+
+class RunSourceAttributionTest(UiTestCase):
+    """Which source a run's row came from, and how that source is named.
+
+    The manifest records no object-to-source attribution, so the payload reads
+    it back from evidence. Nothing here is stored: labels are derived on every
+    request from the source's own front matter, and a source that cannot be
+    read still has to render.
+    """
+
+    # -- fixtures ----------------------------------------------------------
+
+    def write_source(self, relative, text):
+        path = self.repository.evidence_path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def evidence_on(self, relative, observed_at):
+        path = self.repository.evidence_path(relative)
+        return Evidence(
+            source=relative,
+            source_sha256=sha256_file(path),
+            anchor="framework is complete",
+            line_start=1,
+            line_end=1,
+            observed_at=observed_at,
+        )
+
+    def rows_of(self, run_id="20260729T080000Z"):
+        payload = self.client.get("/api/runs/%s" % run_id).json()
+        return payload, payload["groups"][0]["rows"]
+
+    # -- attribution -------------------------------------------------------
+
+    def test_row_names_the_source_its_evidence_came_from(self):
+        obj = self.make_object()
+        self.make_run_manifest(objects_created=[obj.id])
+
+        _, rows = self.rows_of()
+
+        self.assertEqual(self.source_ref, rows[0]["source"])
+
+    def test_row_is_attributed_to_its_latest_evidence(self):
+        later = "meetings/2026-07-29/risk-sync.md"
+        self.write_source(later, "The framework is complete.\n")
+        obj = self.make_object(
+            evidence=[
+                self.evidence_on(self.source_ref, "2026-07-28"),
+                self.evidence_on(later, "2026-07-29"),
+            ]
+        )
+        self.make_run_manifest(
+            objects_refined=[obj.id],
+            sources_processed=[self.source_ref, later],
+        )
+
+        payload = self.client.get("/api/runs/20260729T080000Z").json()
+        refined = payload["groups"][1]["rows"][0]
+
+        self.assertEqual(later, refined["source"])
+
+    def test_later_evidence_outside_the_run_does_not_win_attribution(self):
+        """A run spans several meeting dates, so an object touched by an early
+        source may already carry later evidence from an earlier run. Attributing
+        by unqualified latest evidence would file it under a source this run
+        never processed."""
+        untouched = "meetings/2026-07-30/later-sync.md"
+        self.write_source(untouched, "The framework is complete.\n")
+        obj = self.make_object(
+            evidence=[
+                self.evidence_on(self.source_ref, "2026-07-28"),
+                self.evidence_on(untouched, "2026-07-30"),
+            ]
+        )
+        self.make_run_manifest(
+            objects_created=[obj.id],
+            sources_processed=[self.source_ref],
+        )
+
+        _, rows = self.rows_of()
+
+        self.assertEqual(self.source_ref, rows[0]["source"])
+
+    def test_attribution_falls_back_to_the_latest_evidence_overall(self):
+        other = "meetings/2026-07-30/later-sync.md"
+        self.write_source(other, "The framework is complete.\n")
+        obj = self.make_object(evidence=[self.evidence_on(other, "2026-07-30")])
+        self.make_run_manifest(objects_created=[obj.id], sources_processed=[])
+
+        _, rows = self.rows_of()
+
+        self.assertEqual(other, rows[0]["source"])
+
+    def test_removed_and_evidence_free_rows_are_unattributed(self):
+        self.make_run_manifest(objects_created=["object-that-was-removed"])
+
+        _, rows = self.rows_of()
+
+        self.assertIsNone(rows[0]["source"])
+
+    # -- labels ------------------------------------------------------------
+
+    def described(self, payload, source):
+        return next(entry for entry in payload["sources"] if entry["source"] == source)
+
+    def test_a_source_without_front_matter_is_named_from_its_file_stem(self):
+        """The fixture source has no front matter, which is the ordinary case
+        for meeting notes, not an error path."""
+        obj = self.make_object()
+        self.make_run_manifest(objects_created=[obj.id])
+
+        payload, _ = self.rows_of()
+        described = self.described(payload, self.source_ref)
+
+        self.assertEqual("project update", described["label"])
+        self.assertEqual("meeting", described["kind"])
+        self.assertEqual("2026-07-29", described["date"])
+
+    def test_a_missing_source_file_still_produces_a_label(self):
+        obj = self.make_object()
+        self.make_run_manifest(objects_created=[obj.id])
+        self.source.unlink()
+
+        payload, rows = self.rows_of()
+
+        self.assertEqual(self.source_ref, rows[0]["source"])
+        self.assertEqual("project update", self.described(payload, self.source_ref)["label"])
+
+    def test_a_slack_snapshot_is_named_from_its_channel_id(self):
+        """The collector resolves user names only, so no channel name is stored
+        anywhere and the UI must not invent one."""
+        slack = "meetings/2026-07-29/slack-c0194tgl94h.md"
+        self.write_source(
+            slack,
+            "---\ntitle: Slack channel C0194TGL94H — 2026-07-29\n"
+            "source_type: slack\nslack_channel_id: C0194TGL94H\n---\n\n"
+            "The framework is complete.\n",
+        )
+        obj = self.make_object(evidence=[self.evidence_on(slack, "2026-07-29")])
+        self.make_run_manifest(objects_created=[obj.id], sources_processed=[slack])
+
+        payload, _ = self.rows_of()
+        described = self.described(payload, slack)
+
+        self.assertEqual("Slack C0194TGL94H", described["label"])
+        self.assertEqual("slack", described["kind"])
+
+    def test_front_matter_title_names_a_meeting_source(self):
+        titled = "meetings/2026-07-29/icex-model-discussion.md"
+        self.write_source(
+            titled,
+            "---\ntitle: ICEx Model Discussion\n---\n\nThe framework is complete.\n",
+        )
+        obj = self.make_object(evidence=[self.evidence_on(titled, "2026-07-29")])
+        self.make_run_manifest(objects_created=[obj.id], sources_processed=[titled])
+
+        payload, _ = self.rows_of()
+
+        self.assertEqual("ICEx Model Discussion", self.described(payload, titled)["label"])
+        self.assertEqual("meeting", self.described(payload, titled)["kind"])
+
+    def test_sources_describe_every_processed_source_in_manifest_order(self):
+        second = "meetings/2026-07-29/risk-sync.md"
+        self.write_source(second, "The framework is complete.\n")
+        obj = self.make_object()
+        self.make_run_manifest(
+            objects_created=[obj.id],
+            sources_processed=[self.source_ref, second],
+        )
+
+        payload, _ = self.rows_of()
+
+        self.assertEqual(
+            [self.source_ref, second], [entry["source"] for entry in payload["sources"]]
+        )
+
+    def test_a_source_the_run_did_not_process_is_still_described(self):
+        other = "meetings/2026-07-30/later-sync.md"
+        self.write_source(other, "The framework is complete.\n")
+        obj = self.make_object(evidence=[self.evidence_on(other, "2026-07-30")])
+        self.make_run_manifest(objects_created=[obj.id], sources_processed=[])
+
+        payload, _ = self.rows_of()
+
+        self.assertEqual("later sync", self.described(payload, other)["label"])
+
+    def test_sources_processed_still_lists_plain_strings(self):
+        obj = self.make_object()
+        self.make_run_manifest(objects_created=[obj.id])
+
+        payload, _ = self.rows_of()
+
+        self.assertEqual([self.source_ref], payload["sources_processed"])
 
 
 class ReviewReadRoutesTest(UiTestCase):
@@ -1956,6 +2153,34 @@ class StaticAssetTest(UiTestCase):
         self.assertNotIn("api.runs()", body)
         self.assertNotIn("api.run(", body)
         self.assertNotIn("runsView.render", body)
+
+    def test_runs_view_offers_source_grouping(self):
+        source = self.client.get("/static/js/runs.js").text
+
+        self.assertIn('text: "Group by"', source)
+        self.assertIn("state.groupBy", source)
+        self.assertIn("effectiveGroupBy()", source)
+        self.assertIn("attributedSourceCount", source)
+
+    def test_runs_view_regrouping_does_not_refetch(self):
+        """Regrouping reads the run detail already in memory, for the same
+        reason filtering does."""
+        source = self.client.get("/static/js/runs.js").text
+        marker = "function segmentButton(ctx, value, label)"
+        self.assertIn(marker, source)
+        body = source.split(marker, 1)[1].split("\n}", 1)[0]
+
+        self.assertNotIn("api.runs()", body)
+        self.assertNotIn("api.run(", body)
+        self.assertNotIn("runsView.render", body)
+
+    def test_clearing_filters_does_not_reset_the_grouping(self):
+        source = self.client.get("/static/js/runs.js").text
+        marker = "function clearFilters()"
+        self.assertIn(marker, source)
+        body = source.split(marker, 1)[1].split("\n}", 1)[0]
+
+        self.assertNotIn("groupBy", body)
 
     def test_removal_basket_uses_concise_action_labels(self):
         source = self.client.get("/static/js/objects.js").text
