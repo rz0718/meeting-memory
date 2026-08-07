@@ -63,6 +63,7 @@ class OpenRouterExtractor(KnowledgeExtractor):
     """OpenRouter structured-JSON implementation of the extraction boundary."""
 
     endpoint = "https://openrouter.ai/api/v1/chat/completions"
+    response_preview_limit = 200
 
     def __init__(
         self,
@@ -70,6 +71,7 @@ class OpenRouterExtractor(KnowledgeExtractor):
         model: Optional[str] = None,
         timeout: int = 120,
         version: str = EXTRACTOR_VERSION,
+        max_attempts: int = 3,
     ):
         self.api_key = (
             api_key
@@ -84,6 +86,9 @@ class OpenRouterExtractor(KnowledgeExtractor):
         )
         self.timeout = timeout
         self.version = version
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        self.max_attempts = max_attempts
         if not self.api_key:
             raise ConfigurationError(
                 "OPENROUTER_API_KEY or ANTHROPIC_AUTH_TOKEN is not configured"
@@ -136,35 +141,63 @@ SOURCE WITH LINE NUMBERS:
         )
 
     @staticmethod
-    def _decode_model_json(content: Any) -> Dict[str, Any]:
-        if not isinstance(content, str) or not content.strip():
-            raise TransientExtractionError("empty model response")
-        text = content.strip()
+    def _unwrap(text: str) -> str:
+        """Drop Markdown fences and any prose around the JSON object."""
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else ""
             if text.rstrip().endswith("```"):
                 text = text.rstrip()[:-3].rstrip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            text = text[start : end + 1]
+        return text.strip()
+
+    @classmethod
+    def _preview(cls, content: str) -> str:
+        text = " ".join(content.split())
+        if len(text) > cls.response_preview_limit:
+            text = "%s..." % text[: cls.response_preview_limit]
+        return " (response began: %s)" % text if text else ""
+
+    @classmethod
+    def _decode_model_json(cls, content: Any) -> Dict[str, Any]:
+        # Every shape failure here is the model deviating from the prompt, not a
+        # deterministic defect, so each one stays retryable: identical sources
+        # have failed one night and extracted cleanly the next.
+        if not isinstance(content, str) or not content.strip():
+            raise TransientExtractionError("empty model response")
+        text = cls._unwrap(content.strip())
         try:
             raw = json.loads(text)
         except ValueError as exc:
-            raise ExtractionError("model response was not valid JSON") from exc
-        if not isinstance(raw, dict) or set(raw) != {"candidates"}:
-            raise ExtractionError("model JSON must contain only a candidates array")
+            raise TransientExtractionError(
+                "model response was not valid JSON%s" % cls._preview(content)
+            ) from exc
+        if not isinstance(raw, dict) or not isinstance(raw.get("candidates"), list):
+            raise TransientExtractionError(
+                "model JSON must contain a candidates array%s" % cls._preview(content)
+            )
         return raw
 
     def extract(self, source: MeetingSource) -> List[KnowledgeCandidate]:
-        content = self.client.complete(
-            [
-                {
-                    "role": "system",
-                    "content": "Return strictly valid JSON. Never add Markdown commentary.",
-                },
-                {"role": "user", "content": self._prompt(source)},
-            ],
-            response_format={"type": "json_object"},
-        )
-        raw = self._decode_model_json(content)
-        candidates = raw["candidates"]
-        if not isinstance(candidates, list):
-            raise ExtractionError("model candidates must be an array")
-        return [KnowledgeCandidate.from_dict(item) for item in candidates]
+        messages = [
+            {
+                "role": "system",
+                "content": "Return strictly valid JSON. Never add Markdown commentary.",
+            },
+            {"role": "user", "content": self._prompt(source)},
+        ]
+        attempt = 1
+        while True:
+            content = self.client.complete(
+                messages, response_format={"type": "json_object"}
+            )
+            try:
+                raw = self._decode_model_json(content)
+            except TransientExtractionError:
+                if attempt >= self.max_attempts:
+                    raise
+                attempt += 1
+                continue
+            return [KnowledgeCandidate.from_dict(item) for item in raw["candidates"]]
