@@ -5,6 +5,7 @@ import {
   chartSeries,
   fullDateLabel,
   pointX,
+  runOptionLabel,
   yTicks,
 } from "../../src/meeting_memory/ui/static/js/runs_chart.js";
 
@@ -43,6 +44,56 @@ test("fullDateLabel renders an English UTC calendar date", () => {
 test("fullDateLabel preserves malformed values", () => {
   assert.equal(fullDateLabel("not-a-date"), "not-a-date");
   assert.equal(fullDateLabel(""), "—");
+});
+
+function manifest(runId, startedAt, status = "success") {
+  return { run_id: runId, started_at: startedAt, status };
+}
+
+test("runOptionLabel leaves a date bare when it holds one run", () => {
+  const runs = [
+    manifest("20260810T125024Z", "2026-08-10T12:50:24Z"),
+    manifest("20260806T125026Z", "2026-08-06T12:50:26Z"),
+  ];
+
+  assert.equal(runOptionLabel(runs[0], runs), "2026-08-10");
+  assert.equal(runOptionLabel(runs[1], runs), "2026-08-06");
+});
+
+test("runOptionLabel separates reruns of the same date by UTC time and status", () => {
+  const nightly = manifest(
+    "20260807T125025Z",
+    "2026-08-07T12:50:25Z",
+    "partial_failure"
+  );
+  const recovery = manifest("20260807T131453Z", "2026-08-07T13:14:53Z");
+  const runs = [recovery, nightly, manifest("20260806T125026Z", "2026-08-06T12:50:26Z")];
+
+  assert.equal(runOptionLabel(nightly, runs), "2026-08-07 12:50 · partial failure");
+  assert.equal(runOptionLabel(recovery, runs), "2026-08-07 13:14 · success");
+  assert.notEqual(runOptionLabel(nightly, runs), runOptionLabel(recovery, runs));
+});
+
+test("runOptionLabel keeps every same-date option distinct across a busy day", () => {
+  const runs = [
+    manifest("20260723T143810Z", "2026-07-23T14:38:10Z"),
+    manifest("20260723T143247Z", "2026-07-23T14:32:47Z"),
+    manifest("20260723T125026Z", "2026-07-23T12:50:26Z", "partial_failure"),
+    manifest("20260723T021512Z", "2026-07-23T02:15:12Z"),
+    manifest("20260723T021044Z", "2026-07-23T02:10:44Z", "failed"),
+  ];
+
+  const labels = runs.map((run) => runOptionLabel(run, runs));
+
+  assert.equal(new Set(labels).size, runs.length);
+  assert.equal(labels.at(-1), "2026-07-23 02:10 · failed");
+});
+
+test("runOptionLabel falls back to the run id when the timestamp is missing", () => {
+  const broken = { run_id: "20260807T131453Z", started_at: "", status: "success" };
+
+  assert.equal(runOptionLabel(broken, [broken]), "20260807T131453Z");
+  assert.equal(runOptionLabel({}, []), "—");
 });
 
 test("yTicks returns an integer scale above the largest count", () => {

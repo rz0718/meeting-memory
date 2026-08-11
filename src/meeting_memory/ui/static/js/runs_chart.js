@@ -1,6 +1,6 @@
-// Pure data and geometry helpers for the run-history chart. Keeping these
-// separate from DOM construction makes ordering and scale behavior testable
-// without a browser or a charting dependency.
+// Pure data, label, and geometry helpers for the run history. Keeping these
+// separate from DOM construction makes ordering, labeling, and scale behavior
+// testable without a browser or a charting dependency.
 
 const MONTHS = [
   "Jan",
@@ -47,6 +47,27 @@ export function fullDateLabel(value) {
   const day = Number(match[3]);
   if (!FULL_MONTHS[month - 1] || day < 1 || day > 31) return String(value);
   return `${FULL_MONTHS[month - 1]} ${day}, ${year}`;
+}
+
+function statusLabel(status) {
+  return String(status || "").replace(/_/g, " ") || "unknown";
+}
+
+// A date alone cannot name a run: recovering a failed source means rerunning a
+// date, so a day holds several manifests and every option would read the same.
+// The UTC start time separates them, and the status says which attempt is the
+// one worth opening. Single-run dates stay bare, which is most of them.
+export function runOptionLabel(run, runs) {
+  const startedAt = String(run?.started_at || "");
+  const date = startedAt.slice(0, 10);
+  if (!date) return run?.run_id ? String(run.run_id) : "—";
+  const sameDate = (runs || []).filter(
+    (other) => String(other?.started_at || "").slice(0, 10) === date
+  );
+  if (sameDate.length < 2) return date;
+  const time = startedAt.slice(11, 16);
+  if (!time) return `${date} · ${statusLabel(run.status)}`;
+  return `${date} ${time} · ${statusLabel(run.status)}`;
 }
 
 export function chartSeries(runs, limit = 12) {

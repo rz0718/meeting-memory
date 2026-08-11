@@ -22,7 +22,13 @@ import {
 } from "./knowledge_inbox.js";
 import { objectView } from "./objects.js";
 import { openQueueCase } from "./reviewpeek.js";
-import { chartSeries, fullDateLabel, pointX, yTicks } from "./runs_chart.js";
+import {
+  chartSeries,
+  fullDateLabel,
+  pointX,
+  runOptionLabel,
+  yTicks,
+} from "./runs_chart.js";
 import { busy, empty, reportError } from "./ui.js";
 import { bindRunDetailRefresh, emit } from "./store.js";
 
@@ -167,13 +173,14 @@ function filterBar(ctx) {
       el("option", {
         value: run.run_id,
         selected: run.run_id === state.runId,
-        text: run.started_at.slice(0, 10),
+        text: runOptionLabel(run, state.runs.runs),
       })
     )
   );
 
-  const utcNote = "Run dates use the manifest's UTC date; the timestamps on the "
-    + "page are shown in " + timezoneSuffix() + ".";
+  const utcNote = "Run dates and times in this list use the manifest's UTC "
+    + "clock, and a date that was rerun lists each attempt; the timestamps on "
+    + "the page are shown in " + timezoneSuffix() + ".";
   const runChip = el("span", { class: "chip", title: utcNote }, [
     el("span", { class: "chip__label", text: "Run date" }),
     runSelect,
