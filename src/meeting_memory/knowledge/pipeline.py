@@ -391,6 +391,27 @@ class KnowledgePipeline:
         return raw
 
     @staticmethod
+    def _reports_anything(
+        source_date: str,
+        manifest: Dict[str, Any],
+        date_changes: Dict[str, List[str]],
+    ) -> bool:
+        """Did this run learn anything about this date worth writing down?
+
+        Knowledge changes are the obvious answer, but a rejected or suppressed
+        candidate is also a finding about the date -- it records that the run
+        reached the source and declined what it found.
+        """
+        if any(date_changes.values()):
+            return True
+        prefix = "meetings/%s/" % source_date
+        return any(
+            item.get("source", "").startswith(prefix)
+            for key in ("candidates_rejected", "candidates_suppressed")
+            for item in manifest[key]
+        )
+
+    @staticmethod
     def _report(
         source_date: str,
         manifest: Dict[str, Any],
@@ -686,9 +707,19 @@ class KnowledgePipeline:
         ]
         report_writes: Dict[Path, bytes] = {}
         for source_date in dates:
-            report_writes[
-                self.repository.outputs_dir / ("durable-knowledge-%s.md" % source_date)
-            ] = self._report(
+            report_path = self.repository.outputs_dir / (
+                "durable-knowledge-%s.md" % source_date
+            )
+            # A report summarizes one run, so a rerun of an already-processed
+            # date would otherwise replace the day's real summary with zeros:
+            # every source is already in "success" state, so the rerun skips
+            # them and reports no changes. Recovering one failed source is the
+            # common case, and it must not erase what the first run recorded.
+            if report_path.exists() and not self._reports_anything(
+                source_date, manifest, changes_by_date[source_date]
+            ):
+                continue
+            report_writes[report_path] = self._report(
                 source_date,
                 manifest,
                 events_by_date[source_date],
