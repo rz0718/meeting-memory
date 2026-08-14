@@ -39,6 +39,7 @@ from .util import (
     evidence_freshness,
     json_bytes,
     parse_frontmatter,
+    sha256_bytes,
     sha256_file,
     slugify,
 )
@@ -249,28 +250,74 @@ class KnowledgeRepository:
         value = raw.get("durable_knowledge")
         return value is False or (isinstance(value, str) and value.strip().lower() == "false")
 
-    def qualifying_sources(self, source_date: str) -> List[MeetingSource]:
+    @staticmethod
+    def _body_fingerprint(text: str) -> str:
+        """Hash a source's material, ignoring its front matter.
+
+        One conversation can be synced twice when it carries two calendar
+        entries: the notes come out byte-identical while the front matter
+        differs on calendar_event_id, organizer, and start time. That is enough
+        to change the file hash, so both copies look like separate sources and
+        the same fact gets extracted twice -- once creating an object and once
+        refining or reconfirming it, which inflates its evidence with a second
+        citation of a meeting that only happened once. Fingerprinting the body
+        alone lets the second copy be recognized for what it is.
+
+        A source whose front matter is missing or unreadable is fingerprinted
+        whole rather than skipped, so it can still pair with an identical twin.
+        """
+        try:
+            _, body = parse_frontmatter(text)
+        except SchemaError:
+            body = text
+        return sha256_bytes(body.strip().encode("utf-8"))
+
+    def scan_sources(
+        self, source_date: str
+    ) -> Tuple[List[MeetingSource], List[Dict[str, str]]]:
+        """The date's usable sources, and the copies withheld as duplicates.
+
+        Duplicates are reported rather than dropped in silence: two files with
+        the same body is normally a double calendar sync, but it can also mean
+        a genuine collision worth a human's attention, and neither is visible
+        if the second file simply never appears in the run.
+        """
         directory = self.meetings_dir / source_date
         if not directory.is_dir():
-            return []
-        result = []
-        for path in sorted(directory.glob("*.md"), key=lambda item: item.name.lower()):
+            return [], []
+        kept: List[MeetingSource] = []
+        duplicates: List[Dict[str, str]] = []
+        first_seen: Dict[str, str] = {}
+        # Case is a tie-break, not just a fold: "Tata-Rui.md" and "tata-rui.md"
+        # compare equal lowercased, and without a second key the survivor would
+        # be whichever the filesystem happened to list first.
+        for path in sorted(directory.glob("*.md"), key=lambda item: (item.name.lower(), item.name)):
             lower = path.name.lower()
             if lower.endswith(".transcript.md") or "standup" in lower or "interview" in lower:
                 continue
             if self._frontmatter_opt_out(path):
                 continue
-            data = path.read_bytes()
-            result.append(
+            content = path.read_bytes().decode("utf-8")
+            reference = self.source_reference(path)
+            fingerprint = self._body_fingerprint(content)
+            original = first_seen.get(fingerprint)
+            if original is not None:
+                duplicates.append({"source": reference, "duplicate_of": original})
+                continue
+            first_seen[fingerprint] = reference
+            kept.append(
                 MeetingSource(
                     path=path,
-                    relative_path=self.source_reference(path),
+                    relative_path=reference,
                     source_date=source_date,
                     sha256=sha256_file(path),
-                    content=data.decode("utf-8"),
+                    content=content,
                 )
             )
-        return result
+        return kept, duplicates
+
+    def qualifying_sources(self, source_date: str) -> List[MeetingSource]:
+        return self.scan_sources(source_date)[0]
 
     @staticmethod
     def _only_marker_pair(text: str, begin: str, end: str) -> Tuple[int, int]:

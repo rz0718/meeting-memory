@@ -99,6 +99,7 @@ class KnowledgePipeline:
             "sources_examined": [],
             "sources_processed": [],
             "sources_skipped": [],
+            "sources_deduplicated": [],
             "objects_created": [],
             "objects_reconfirmed": [],
             "objects_refined": [],
@@ -422,6 +423,11 @@ class KnowledgePipeline:
         examined = [item for item in manifest["sources_examined"] if item.startswith("meetings/%s/" % source_date)]
         processed = [item for item in manifest["sources_processed"] if item.startswith("meetings/%s/" % source_date)]
         skipped = [item for item in manifest["sources_skipped"] if item.startswith("meetings/%s/" % source_date)]
+        deduplicated = [
+            item
+            for item in manifest.get("sources_deduplicated", [])
+            if item.get("source", "").startswith("meetings/%s/" % source_date)
+        ]
         reviews = date_changes["reviews"]
         rejected = [
             item
@@ -455,6 +461,7 @@ class KnowledgePipeline:
 - %d source documents examined
 - %d processed
 - %d unchanged
+- %d withheld as a duplicate of another source
 
 ## Changes
 
@@ -481,6 +488,7 @@ class KnowledgePipeline:
             len(examined),
             len(processed),
             len(skipped),
+            len(deduplicated),
             len(date_changes["created"]),
             len(date_changes["reconfirmed"]),
             len(date_changes["refined"]),
@@ -547,13 +555,19 @@ class KnowledgePipeline:
 
         for source_date in dates:
             try:
-                sources = self.repository.qualifying_sources(source_date)
+                sources, duplicates = self.repository.scan_sources(source_date)
             except Exception as exc:
                 manifest["errors"].append(
                     {"scope": "discovery", "date": source_date, "error": str(exc)}
                 )
                 failed_sources += 1
                 continue
+            # Withheld copies are still examined: the run looked at the file and
+            # made a decision about it, and a reader chasing a missing meeting
+            # needs to find it accounted for somewhere.
+            for entry in duplicates:
+                manifest["sources_examined"].append(entry["source"])
+                manifest["sources_deduplicated"].append(entry)
             for source in sources:
                 manifest["sources_examined"].append(source.relative_path)
                 initial_hashes[source.relative_path] = source.sha256

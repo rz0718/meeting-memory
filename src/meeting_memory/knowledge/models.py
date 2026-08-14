@@ -808,6 +808,14 @@ def validate_run_manifest(raw: Any) -> None:
             isinstance(item, dict) for item in suppressed
         ):
             raise SchemaError("run.candidates_suppressed must contain objects")
+    # Likewise absent from manifests written before duplicate sources were
+    # withheld, and every one of those must keep validating.
+    if "sources_deduplicated" in raw:
+        deduplicated = raw["sources_deduplicated"]
+        if not isinstance(deduplicated, list) or not all(
+            isinstance(item, dict) for item in deduplicated
+        ):
+            raise SchemaError("run.sources_deduplicated must contain objects")
 
 
 def validate_review_run_manifest(raw: Any) -> None:

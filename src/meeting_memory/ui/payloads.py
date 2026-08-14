@@ -65,6 +65,8 @@ def _run_counts(manifest: Dict[str, Any]) -> Dict[str, int]:
         "candidates_rejected": len(manifest["candidates_rejected"]),
         # Absent from manifests written before tombstones existed.
         "candidates_suppressed": len(manifest.get("candidates_suppressed", [])),
+        # Absent from manifests written before duplicate sources were withheld.
+        "sources_deduplicated": len(manifest.get("sources_deduplicated", [])),
         "errors": len(manifest["errors"]),
     }
 
@@ -374,6 +376,7 @@ def run_detail_payload(
         "sources": [attribution.describe(value) for value in ordered_sources],
         "sources_processed": list(manifest["sources_processed"]),
         "sources_skipped": list(manifest["sources_skipped"]),
+        "sources_deduplicated": list(manifest.get("sources_deduplicated", [])),
         "candidates_rejected": list(manifest["candidates_rejected"]),
         "candidates_suppressed": list(manifest.get("candidates_suppressed", [])),
         "errors": list(manifest["errors"]),

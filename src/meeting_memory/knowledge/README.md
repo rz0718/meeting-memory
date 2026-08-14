@@ -109,6 +109,17 @@ than the full Google-sync frontmatter. Slack snapshots already follow this forma
 
 Everything else in the date folder is treated as a durable-knowledge source.
 
+Notes that survive those rules are then deduplicated by body. Two files in the
+same date folder whose text is identical once frontmatter is stripped are one
+conversation synced twice — typically a meeting that carried two calendar
+entries, so the notes match while `calendar_event_id`, `organizer`, and
+`start_time` differ. Only the first by filename is extracted; the rest are
+listed in the run manifest under `sources_deduplicated` (with the file each one
+duplicates) and named in the day's report. Without this, the same fact is
+extracted twice and the second pass reconfirms or refines the object the first
+pass created, which reads as corroboration from a second meeting and leaves the
+object citing a conversation that only happened once.
+
 ### 3. Frontmatter (mostly optional for this module)
 
 - The **only** frontmatter key this module reads is `durable_knowledge`

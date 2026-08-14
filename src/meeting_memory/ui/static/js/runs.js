@@ -763,6 +763,15 @@ function sourceSummary(counts, unchanged) {
           text: `${counts.candidates_rejected} candidates rejected during this run.`,
         })
       : null,
+    // Two files carrying one meeting is usually a double calendar sync, but a
+    // reader looking for a meeting that never appears needs to be told where
+    // it went rather than left to assume it was missed.
+    counts.sources_deduplicated
+      ? el("div", {
+          class: "source-summary__note",
+          text: `${counts.sources_deduplicated} sources withheld as duplicates of another source.`,
+        })
+      : null,
     // A removed or merged-away fact that sources keep restating is the signal
     // that the retirement may have been wrong, so the block is stated rather
     // than left silent.
