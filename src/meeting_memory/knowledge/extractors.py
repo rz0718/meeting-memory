@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
 
@@ -64,6 +65,11 @@ class OpenRouterExtractor(KnowledgeExtractor):
 
     endpoint = "https://openrouter.ai/api/v1/chat/completions"
     response_preview_limit = 200
+    inline_image_data = re.compile(
+        r"data:image/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+",
+        re.IGNORECASE,
+    )
+    inline_image_placeholder = "[inline image data omitted from extraction]"
 
     def __init__(
         self,
@@ -101,8 +107,13 @@ class OpenRouterExtractor(KnowledgeExtractor):
             self.api_key, self.model, timeout=self.timeout
         )
 
-    @staticmethod
-    def _prompt(source: MeetingSource) -> str:
+    @classmethod
+    def _prompt_line(cls, line: str) -> str:
+        """Remove non-text image payloads without changing source line numbers."""
+        return cls.inline_image_data.sub(cls.inline_image_placeholder, line)
+
+    @classmethod
+    def _prompt(cls, source: MeetingSource) -> str:
         return """You extract only durable company knowledge from a dated source document.
 The document may contain Google Meet notes or a Slack channel message digest.
 
@@ -137,7 +148,10 @@ SOURCE WITH LINE NUMBERS:
             source.relative_path,
             source.sha256,
             source.source_date,
-            "\n".join("%d: %s" % (index, line) for index, line in enumerate(source.lines, 1)),
+            "\n".join(
+                "%d: %s" % (index, cls._prompt_line(line))
+                for index, line in enumerate(source.lines, 1)
+            ),
         )
 
     @staticmethod

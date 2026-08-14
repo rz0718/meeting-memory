@@ -93,6 +93,31 @@ class DecodeModelJsonTest(unittest.TestCase):
         self.assertLess(len(message), 400)
 
 
+class ExtractionPromptTest(unittest.TestCase):
+    def test_omits_inline_image_data_without_changing_line_numbers(self):
+        source = MeetingSource(
+            path=Path("meetings/2026-08-06/notes.md"),
+            relative_path="meetings/2026-08-06/notes.md",
+            source_date="2026-08-06",
+            sha256="0" * 64,
+            content=(
+                "The team approved the launch.\n"
+                "[image1]: <data:image/png;base64,aGVsbG8=>\n"
+                "Rui owns the rollout.\n"
+            ),
+        )
+
+        prompt = OpenRouterExtractor._prompt(source)
+
+        self.assertIn("1: The team approved the launch.", prompt)
+        self.assertIn(
+            "2: [image1]: <[inline image data omitted from extraction]>", prompt
+        )
+        self.assertIn("3: Rui owns the rollout.", prompt)
+        self.assertNotIn("aGVsbG8=", prompt)
+        self.assertIn("aGVsbG8=", source.content)
+
+
 class ExtractRetryTest(unittest.TestCase):
     def test_retries_a_malformed_response(self):
         extractor = build_extractor(["oops, thinking out loud", VALID_RESPONSE])
